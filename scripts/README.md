@@ -17,6 +17,9 @@
 | browser-qa.cjs | 美国陆战桌面/手机交互与容器宽度回归检查 |
 | browser-trees-qa.cjs | 中国空军/德国近岸海军交互、固定卡片大小与字体继承检查 |
 | package.py | 打包本地部署产物，不上传 |
+| production_export_request.py | 从 shop 生成 34 棵正式树及现有依赖的 Special:Export 标题列表与离线复制助手 |
+| production.py | 读取用户导出的 XML、旧树只读渲染证据及拆包转换产物，生成正式科技树全量/固定切片 XML、原页回退包、链接核对表和部署助手 |
+| browser-production-qa.cjs | 对正式包的 34 棵树进行桌面/手机宽度下的交互检查，不写入 Wiki |
 
 ## 数据与维护规则
 
@@ -30,3 +33,11 @@
 - 公开仓库不提交 evidence/、wiki/、work/、vendor/；不要 force add 真实游戏或第三方站点材料。未来自动测试优先使用自建合成夹具。
 
 正常构建流程与所需输入在项目 README 中；当前 package.py 仍引用本地历史部署文档，此类文档不随公开仓库分发。解除本机材料及部署说明硬依赖属于可复现核心阶段，不能称为已完成。
+
+## 当前正式科技树打包路径
+
+在现有构建输出准备好后，用 `python scripts/production_export_request.py` 生成站内导出标题列表。用户从 Special:Export 保存当前修订 XML 后，运行 `python scripts/production.py --export-xml <主导出.xml> <补充导出.xml>`。路径参数需放在此选项后；源码和渲染快照分别保存到被 Git 忽略的 `evidence/production/`。可选 `--refresh-rendered` 从公开页面只读补充实际渲染链接；受站点防护影响时保留已有证据，不可宣称在线核对完成。
+
+生产生成器使用游戏 shop 的全部非直升机分支，输出到 `wiki/production/`；只替换旧页面 Tree-Start 至 Tree-End 区域，保留其余源码。它不会迁移载具文章、修改 Tr 或替换 Common.js。实际渲染的旧目标优先于 Tr 查表，当前源码的手动指定链接优先；通过 API 核对页面存在性，未确认目标单独列入 `manifest.json` 和 `link-audit.csv`，不能将其描述为已验证可用。用户导出和只读快照均不得提交到公开仓库。
+
+随后运行 `node scripts/browser-production-qa.cjs`（沿用 `WTW_NODE_MODULES`）；检查使用正式 Lua 输出与正式 JS/CSS，但阻止远程图片请求以稳定验证交互，因此不替代线上图片/字体/加载器和 Scribunto 配额验收。全站加载兼容性报告来自用户导出的 Common.js 与 ResourceLoader 源码；当前使用已有加载路径加载 `MediaWiki:WTJ.js`，无需个人脚本。现有固定切片仅设置每片 15 页/1500000 源码 UTF-8 字节，未实现未来 GUI 可配置的最终 XML 文件大小阈值。

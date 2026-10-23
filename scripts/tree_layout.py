@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
-def enrich(tree,index,economy,root,repo):
- presentation=json.loads((root/'evidence/presentation-map.json').read_text(encoding='utf-8'))
+def enrich(tree,index,economy,root,repo,presentation=None):
+ if presentation is None:presentation=json.loads((root/'evidence/presentation-map.json').read_text(encoding='utf-8'))
  vehicles=presentation['vehicles'];folders=presentation['groups'];files=presentation['files'];assets={};missing=[]
  def asset(code):
   filename=vehicles.get(code,folders.get(code,{})).get('file',code+'.png')

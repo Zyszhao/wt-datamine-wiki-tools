@@ -13,6 +13,21 @@ TAG_TYPES = {
 # Explicit scope decision: racing variant, not the obtainable Black Cat vehicle.
 SPECIAL_VARIANTS = {
     'us_m18_hellcat_black_cat_race': 'special racing variant; units.csv English shop name: "Racing" M18',
+    # Explicit game-code policy, not a blanket ban on obtainable event rewards.
+    # These shop entries are hidden mission/race/WWI-mode clones; the normal
+    # obtainable counterparts remain in the encyclopaedia trees and full index.
+    'cn_ztz_96a_race': 'special racing variant of cn_ztz_96a',
+    'ussr_t_80u_race': 'special racing variant of ussr_t_80u',
+    'ussr_pr_206_race': 'special racing variant of ussr_pr_206',
+    'f_4e_event': 'mission/event-only clone of f-4e',
+    'mig-21_bis_event': 'mission/event-only clone of mig-21_bis',
+    'os2u_1_naval': 'ship-launched mission aircraft clone of os2u_1',
+    'germ_garford_putilov_event': 'WWI special-mode vehicle, not a research/reward vehicle',
+    'germ_beutepanzer_mk_iv_event': 'WWI special-mode vehicle, not a research/reward vehicle',
+    'germ_a7v_event': 'WWI special-mode vehicle, not a research/reward vehicle',
+    'uk_garford_putilov_event': 'WWI special-mode vehicle, not a research/reward vehicle',
+    'uk_saint_chamond_event': 'WWI special-mode vehicle, not a research/reward vehicle',
+    'uk_mark_v_event': 'WWI special-mode vehicle, not a research/reward vehicle',
 }
 
 def exclusion_reason(code, unit_tags):
