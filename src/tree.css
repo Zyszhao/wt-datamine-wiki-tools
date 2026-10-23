@@ -57,3 +57,18 @@
 .wtt.wtt-list .wtt-board{background:#242e33!important}
 
 .wtt input,.wtt select,.wtt button,.wtt output,.wtt summary{font-family:inherit}
+
+/* Keep tree cards inside balanced edges and let flat lists use the whole row. */
+.wtt-toolbar{gap:8px 12px;padding:12px 14px}
+.wtt-filters{display:grid;grid-template-columns:minmax(180px,1fr) auto auto auto auto auto;gap:8px;align-items:stretch}
+.wtt-filters input{width:100%}
+.wtt-filters select,.wtt-filters button,.wtt-br-filter>summary{height:36px;box-sizing:border-box;white-space:nowrap}
+.wtt-br-filter>summary{padding:7px 12px}
+.wtt-rank>span{padding-left:12px;font-size:11px}
+.wtt-header{font-size:13px}
+.wtt.wtt-list .wtt-board{padding:16px 12px;gap:16px 12px;justify-content:space-between}
+.wtt .wtt-image a.new{display:none}
+.wtt-name{line-height:16px}
+@media(max-width:850px){.wtt-filters{grid-template-columns:repeat(5,minmax(0,1fr))}.wtt-filters input{grid-column:1/-1}.wtt-filters select,.wtt-filters button,.wtt-br-filter>summary{width:100%;padding-left:5px;padding-right:5px;font-size:12px}.wtt-br-ranges{right:0}}
+@media(max-width:480px){.wtt-toolbar{padding:10px}.wtt-filters{grid-template-columns:repeat(3,minmax(0,1fr))}.wtt-modes{margin-left:auto}.wtt-br-filter{position:static}.wtt-filters{position:relative}.wtt-br-ranges{top:100%;max-width:calc(100vw - 64px)}}
+@media(max-width:480px){.wtt-br-filter[open]{grid-column:1/-1}.wtt-br-ranges{position:static;width:100%;max-width:100%;margin-top:8px}}

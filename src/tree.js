@@ -2,15 +2,15 @@
 (function(){'use strict';
  function init(scope){scope.querySelectorAll('.wtt').forEach(function(root){
   if(root.dataset.ready)return;root.dataset.ready='1';
-  // Scale against the actual content column, capped to keep cards readable.
+  // Redistribute columns without scaling cards or typography.
   var board=root.querySelector('.wtt-board');
   root.style.maxWidth='1330px';
   function fit(){
-   var base=+root.dataset.width||950,width=Math.max(base,root.clientWidth),stretch=(width-120)/(base-120);
+   var base=+root.dataset.width||950,width=Math.max(base,root.clientWidth),inset=12,stretch=(width-120-inset*2)/(base-120);
    board.style.zoom='1';board.style.width=width+'px';
-   board.style.gridTemplateColumns='repeat('+Math.max(1,Math.floor((width-2)/132))+',120px)';
-   function map(x){return 60+(x-60)*stretch;}
-   root.querySelectorAll('.wtt-node,.wtt-arrow').forEach(function(e){if(!e.dataset.baseLeft)e.dataset.baseLeft=String(parseFloat(e.style.left)||0);var x=+e.dataset.baseLeft;e.style.left=(e.classList.contains('wtt-node')?x*stretch:map(x))+'px';});
+   board.style.gridTemplateColumns='repeat('+Math.max(1,Math.floor((width-inset*2+12)/132))+',120px)';
+   function map(x){return inset+60+(x-60)*stretch;}
+   root.querySelectorAll('.wtt-node,.wtt-arrow').forEach(function(e){if(!e.dataset.baseLeft)e.dataset.baseLeft=String(parseFloat(e.style.left)||0);var x=+e.dataset.baseLeft;e.style.left=(e.classList.contains('wtt-node')?inset+x*stretch:map(x))+'px';});
    var divider=root.querySelector('.wtt-divider');var header=root.querySelector('.wtt-header');
    if(!header.dataset.baseDivider)header.dataset.baseDivider=String(parseFloat(header.style.gridTemplateColumns)||651);
    var split=map(+header.dataset.baseDivider);header.style.gridTemplateColumns=split+'px 1fr';
@@ -38,12 +38,12 @@
    function sync(){var lo=values[+inputs[0].value],hi=values[+inputs[1].value];output.textContent=lo.toFixed(1)+' — '+hi.toFixed(1);inputs.forEach(function(s){s.setAttribute('aria-valuetext',values[+s.value].toFixed(1));});fill.style.left=(+inputs[0].value/(values.length-1)*100)+'%';fill.style.right=(100-+inputs[1].value/(values.length-1)*100)+'%';}
    row.appendChild(track);row.appendChild(output);ranges.appendChild(row);brRanges[mode]={values:values,inputs:inputs};sync();
   });bar.appendChild(brPanel);
-  document.addEventListener('pointerdown',function(e){if(!brPanel.contains(e.target))brPanel.open=false;});brPanel.addEventListener('keydown',function(e){if(e.key==='Escape'){brPanel.open=false;summary.focus();}});
+  document.addEventListener('click',function(e){if(!brPanel.contains(e.target))brPanel.open=false;});brPanel.addEventListener('keydown',function(e){if(e.key==='Escape'){brPanel.open=false;summary.focus();}});
   var result=document.createElement('div');result.className='wtt-results';result.hidden=true;var resultText=document.createElement('span');resultText.setAttribute('role','status');resultText.setAttribute('aria-live','polite');result.appendChild(resultText);var clear=document.createElement('button');clear.type='button';clear.textContent='清除筛选';clear.addEventListener('click',function(){input.value='';status.value='';ranks.value='';roles.value='';Object.keys(brRanges).forEach(function(mode){var r=brRanges[mode];r.inputs[0].value='0';r.inputs[1].value=String(r.values.length-1);r.inputs[0].dispatchEvent(new Event('input'));});filter();});result.appendChild(clear);
   var list=document.createElement('button');list.className='wtt-view-toggle';list.type='button';list.textContent='列表';list.setAttribute('aria-pressed','false');list.addEventListener('click',function(){root.querySelectorAll('.wtt-open').forEach(closeGroup);var isList=root.classList.toggle('wtt-list');list.textContent=isList?'科技树':'列表';list.setAttribute('aria-pressed',String(isList));root.querySelectorAll('.wtt-group').forEach(function(g){g.tabIndex=isList?-1:0;g.setAttribute('role',isList?'group':'button');});filter();});bar.appendChild(list);root.querySelector('.wtt-toolbar').appendChild(bar);root.querySelector('.wtt-toolbar').appendChild(result);
   function filter(){var q=input.value.trim().toLocaleLowerCase(),visible=new Set();var active=!!(q||status.value||ranks.value||roles.value||Object.keys(brRanges).some(function(mode){var r=brRanges[mode];return +r.inputs[0].value!==0||+r.inputs[1].value!==r.values.length-1;}));root.classList.toggle('wtt-filter-active',active);cards.forEach(function(c){var inRange=Object.keys(brRanges).every(function(mode){var r=brRanges[mode],v=+c.querySelector('.wtt-br-'+mode).textContent;return v>=r.values[+r.inputs[0].value]&&v<=r.values[+r.inputs[1].value];});var match=c.dataset.search.toLocaleLowerCase().includes(q)&&(!status.value||c.classList.contains('wtt-'+status.value))&&(!ranks.value||ranks.value===c.dataset.rank)&&(!roles.value||roles.value===c.dataset.role)&&inRange;c.classList.toggle('wtt-filtered-card',!match);c.classList.toggle('wtt-match',active&&match);if(match)visible.add(c.dataset.unit);});root.querySelectorAll('.wtt-node').forEach(function(n){var match=!!n.querySelector('.wtt-card:not(.wtt-filtered-card)');n.classList.toggle('wtt-filtered',!match);n.classList.toggle('wtt-matched-node',active&&match);});result.hidden=!active;resultText.textContent='找到 '+visible.size+' 辆';root.querySelector('.wtt-search-hint').textContent=active?'匹配 '+visible.size+' / '+cards.length+' 辆':'共 '+cards.length+' 辆 · 点击文件夹展开';root.classList.toggle('wtt-no-results',visible.size===0);root.dataset.matches=String(visible.size);}input.addEventListener('input',filter);status.addEventListener('change',filter);
   function drawEdges(map){var ns='http://www.w3.org/2000/svg',svg=board.querySelector('.wtt-lines');if(!svg){svg=document.createElementNS(ns,'svg');svg.classList.add('wtt-lines');board.appendChild(svg);}svg.replaceChildren();root.querySelectorAll('.wtt-edge').forEach(function(e){var a=e.dataset,x=map(+a.x1),z=map(+a.x2),y=+a.y1,v=+a.y2,mid=y+Math.max(10,(v-y)/2),p=document.createElementNS(ns,'path');p.setAttribute('d','M'+x+' '+y+' V'+mid+' H'+z+' V'+(v-7));p.dataset.from=a.from;p.dataset.to=a.to;p.setAttribute('fill','none');p.setAttribute('stroke','#638694');p.setAttribute('stroke-width','6');svg.appendChild(p);var h=document.createElementNS(ns,'path');h.setAttribute('d','M'+(z-7)+' '+(v-9)+' L'+z+' '+v+' L'+(z+7)+' '+(v-9)+' Z');h.dataset.from=a.from;h.dataset.to=a.to;h.setAttribute('fill','#638694');svg.appendChild(h);});}
-  filter();
+  filter();root.dataset.ready='1';
  });}
  if(window.mw&&mw.hook)mw.hook('wikipage.content').add(function(c){init(c[0]||document);});
  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',function(){init(document);});else init(document);
