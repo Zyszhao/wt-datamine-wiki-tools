@@ -1,0 +1,23 @@
+# Public repository boundary: source and documentation only.
+# Datamined content, site snapshots, images and generated outputs stay local.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/AGENTS.md
+!/scripts/
+!/src/
+!/docs/
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.env
+.env.*
+*.key
+*.pem
+
+# Local historical deployment records are not part of the public source project.
+/docs/*
+!/docs/PROJECT-GOALS.md
+!/docs/PUBLIC-REPOSITORY.md
