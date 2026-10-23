@@ -238,9 +238,9 @@ def main():
   for code,asset in tree['assets'].items():
    if code not in used:continue
    if not asset['remote'] and asset['local']:
-    filename='WTJ_'+code+'.png';shutil.copyfile(WORK/'assets'/asset['local'],OUT/'uploads'/filename);asset['file']=filename;uploads[filename]=code
+    filename=code+'.png';shutil.copyfile(WORK/'assets'/asset['local'],OUT/'uploads'/filename);asset['file']=filename;uploads[filename]=code
    elif not asset['remote']:
-    asset['file']='WTJ_'+code+'.png'
+    asset['file']=code+'.png'
   for col in tree['columns']:
    for node in col['nodes']:
     folder=node['folder']
@@ -257,6 +257,7 @@ def main():
  lua=(ROOT/'src/catalogue.lua').read_text(encoding='utf-8').replace("local prefix='WTJTreeTesting'","local prefix='WTJ'").replace("..'_testing.json'","..'.json'")
  lua=lua.replace("local existing=args.links=='existing'","local existing=args.links~='testing'")
  lua=lua.replace("prefix..'/vehicle/'..code..'_testing'","r.name")
+ lua=lua.replace('WTJTreeTesting_folder_prem.png','Item_group_prem.png').replace('WTJTreeTesting_folder.png','Item_group.png')
  lua=lua.replace('现有 BWiki 页面（缺映射时回退测试页）','现有 BWiki 页面（缺映射时回退中文名称）').replace('独立测试页面','中文名称页面')
  lua=lua.replace("exp_torpedo_boat='PT_icon.png'", "exp_destroyer='DD_icon.png',exp_cruiser='CL_icon.png',exp_gun_boat='PC_icon.png',exp_torpedo_boat='PT_icon.png'")
  # Production package contains trees only, without the unrelated M1A2 demo APIs.
@@ -269,12 +270,24 @@ def main():
  page('MediaWiki:WTJ.js','javascript',js,'tree.js')
  css=(ROOT/'src/tree.css').read_text(encoding='utf-8').replace('}}','} }')
  page('模板:WTJ/styles','wikitext','<includeonly>{{ResourceLoader|WTJ}}\n{{#css:\n'+css+'\n}}</includeonly>','styles.wiki')
- for source,destination in [('WTJTreeTesting_folder.png','WTJ_folder.png'),('WTJTreeTesting_folder_prem.png','WTJ_folder_prem.png')]:
-  shutil.copyfile(WORK/'assets'/source,OUT/'uploads'/destination);uploads[destination]='official saved folder asset'
+ # Existing site files, confirmed by read-only imageinfo. A renamed File without
+ # redirect must be referenced at its new title; no replacement upload is needed.
+ background_cache=EVIDENCE/'background-files-current.json'
+ if not background_cache.exists():
+  background_cache.write_text(dump(api(action='query',titles='|'.join('文件:'+f for f in ('Item group.png','Item group prem.png','Item own.png','Item prem.png','Item squad.png')),prop='imageinfo',iiprop='url|size')),encoding='utf-8')
+ background_data=json.loads(background_cache.read_text(encoding='utf-8'))
+ background_files={}
+ for entry in background_data['query']['pages'].values():
+  assert 'missing' not in entry and entry.get('imageinfo'),entry['title']
+  filename=entry['title'].split(':',1)[1].replace(' ','_')
+  background_files[filename]={'file':filename,'url':entry['imageinfo'][0]['url']}
+ assert set(background_files)=={'Item_group.png','Item_group_prem.png','Item_own.png','Item_prem.png','Item_squad.png'}
+ (OUT/'existing-backgrounds.json').write_text(dump(background_files),encoding='utf-8')
+ files.update({k.casefold():v for k,v in background_files.items()})
+ (EVIDENCE/'presentation-map.json').write_text(dump({'vehicles':mapping,'groups':groups,'files':files}),encoding='utf-8')
  # Production runtime must not depend on test page names or image uploads.
  for p in pages:
   if p['model']=='Scribunto':
-   p['content']=p['content'].replace('WTJTreeTesting_folder','WTJ_folder');(OUT/'pages'/p['file']).write_text(p['content'],encoding='utf-8')
    p['bytes']=len(p['content'].encode('utf-8'))
   if 'WTJTreeTesting' in p['content'] or '_testing' in p['title']:raise ValueError('Testing dependency: '+p['title'])
  xml_file(pages,OUT/'WTJ-all-trees-production.xml');xml_file(rollback,OUT/'WTJ-rollback-existing-trees.xml')
@@ -312,7 +325,8 @@ def instructions(pages,manifest,slices):
  '新增支持页面使用 WTJ 前缀，不依赖测试页。MediaWiki:WTJ.js 为全站可用资源，由模板:WTJ/styles 的 ResourceLoader 标记通过本站已有 MediaWiki:Common.js 加载，不替换全站 Common.js、不要求用户 common.js。',
  '右上角的数量/展开提示已移除；筛选时仍有结果栏。链接优先采用旧树实际渲染目标，当前源码手动链接优先于其余映射，Tr 仅补充缺项。再核对旧目标及游戏中文名/代码备选的存在性；未确认时保留原目标，缺原目标时回退中文名。详见 link-audit.csv 和 manifest.json，不把 API 返回缺失的目标伪报为已存在。',
  '本包 '+str(len(manifest['unverified_links']))+' 个载具目标未获 API 存在性确认；这不等于全部由本次改动新增的红链。原页面实际输出亦含这类链接，包中保留并逐项报告，尚不能宣布所有载具链接可用。',
- '','## 图片','','XML 只包含页面，不包含二进制文件。先上传 uploads/ 中列出的图片（文件名保持不变），尤其 WTJ_folder.png、WTJ_folder_prem.png；其余尽量复用现有站点文件。没有对应纹理的载具保留文字卡片而不产生缺图链接，缺失报告见 manifest。',
+ '','## 图片','','XML 只包含页面，不包含二进制文件。仅需上传 uploads/ 中列出的游戏代码命名图片，文件名保持不变，不加 WTJ 前缀。JSON 的 assets.file 与上传名称一致，Lua 按此字段生成 File 内链。',
+ '五张背景均复用已存在的本站文件：Item own.png、Item prem.png、Item squad.png、Item group.png、Item group prem.png；模块内使用等价的下划线写法。不再上传 WTJ_folder 或 WTJ_folder_prem，也不依赖已移动且没有重定向的测试文件名。existing-backgrounds.json 记录只读核对结果。',
  '','## 验收','','导入后清除正式科技树页面的解析缓存并强制刷新；用匿名窗口确认筛选栏、三模式 BR、列表、折叠与宽度。全量 Lua 和 XML 回读检查见 validation.json；本地验证不等于生产导入与 Scribunto 内存/时间预算已通过。',
  '','## 原页面替换清单','','| 页面 | 数据键 | 卡片数 | 抓取版本 |','|---|---|---:|---:|']
  for key,r in manifest['trees'].items():lines.append(f"| {r['title']} | {key} | {r['visible']} | {r['old_revision']} |")
@@ -370,10 +384,15 @@ def validate(pages,trees,index,out):
    expected.append(nodes)
   assert [[(n['folder'],n['units']) for n in c['nodes']] for c in tree['columns']]==expected,key
   actual=json.loads(bytitle['WTJ/data/'+key+'_tree.json'])
+  for code,asset in actual['assets'].items():
+   if asset.get('local') and not asset.get('remote'):
+    assert (out/'uploads'/asset['file']).is_file(),(key,code,asset['file'])
+    assert not asset['file'].startswith(('WTJ_','WTJTreeTesting_')),asset['file']
+  assert not any(old in body for old in ('WTJ_folder','WTJTreeTesting_folder')),key
   def image_link(m):
    filename,size=m[1],m[2];asset=next((a for a in actual['assets'].values() if a['file']==filename),None)
    if asset and asset['local']:src='../../assets/'+asset['local']
-   elif filename in ('WTJ_folder.png','WTJ_folder_prem.png'):src='../../../wiki/production/uploads/'+filename
+   elif filename in ('Item_group.png','Item_group_prem.png'):src='../../assets/'+('WTJTreeTesting_folder_prem.png' if filename=='Item_group_prem.png' else 'WTJTreeTesting_folder.png')
    elif (WORK/'assets'/filename).exists():src='../../assets/'+filename
    else:src=(asset or {}).get('remote') or files.get(filename.casefold(),{}).get('url') or BASE+'Special:Redirect/file/'+filename
    return '<img '+('height="43"' if size=='x43' else 'width="'+size+'"')+' src="'+html.escape(src,quote=True)+'">'
@@ -398,7 +417,10 @@ def validate(pages,trees,index,out):
   slice_titles.extend(n.findtext('m:title',namespaces=ns) for n in nodes)
  assert len(slice_titles)==len(set(slice_titles))==len(pages) and set(slice_titles)==set(bytitle)
  assert len(trees)==34 and all(t['branch']!='helicopters' for t in trees.values())
- (out/'validation.json').write_text(dump({'passed':True,'trees':rendered,'xml_roundtrip':True,'live_import_verified':False}),encoding='utf-8')
+ runtime=bytitle['模块:WTJ/catalogue']
+ assert "'Item_group_prem.png'" in runtime and "'Item_group.png'" in runtime
+ assert not any(p.name.startswith('WTJ_') for p in (out/'uploads').iterdir())
+ (out/'validation.json').write_text(dump({'passed':True,'trees':rendered,'xml_roundtrip':True,'upload_filenames_match_json':True,'existing_folder_backgrounds':'Item_group.png / Item_group_prem.png','live_import_verified':False}),encoding='utf-8')
  (preview/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>34 棵正式科技树本地预览</title><h1>34 棵正式科技树本地预览</h1><p>本地 Lua 输出及正式 JS/CSS；不代表线上导入已经验收。</p>'+''.join('<p><a href="'+k+'.html">'+v+'</a></p>' for k,v in json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8')).items()),encoding='utf-8')
 
 if __name__=='__main__':main()

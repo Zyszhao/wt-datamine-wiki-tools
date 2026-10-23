@@ -40,4 +40,6 @@
 
 生产生成器使用游戏 shop 的全部非直升机分支，输出到 `wiki/production/`；只替换旧页面 Tree-Start 至 Tree-End 区域，保留其余源码。它不会迁移载具文章、修改 Tr 或替换 Common.js。实际渲染的旧目标优先于 Tr 查表，当前源码的手动指定链接优先；通过 API 核对页面存在性，未确认目标单独列入 `manifest.json` 和 `link-audit.csv`，不能将其描述为已验证可用。用户导出和只读快照均不得提交到公开仓库。
 
+正式图片命名：待上传的载具/group 图使用 `<游戏代码>.png`，不加 WTJ 前缀；JSON `assets.file`、实际上传文件和 Lua 输出的 File 引用保持一致。五张背景复用本站 `Item own.png`、`Item prem.png`、`Item squad.png`、`Item group.png`、`Item group prem.png`，模块中的下划线写法与空格等价。`evidence/production/background-files-current.json` 是只读 imageinfo 缓存，首次缺失时生成器自动读取，部署包记录为 `existing-backgrounds.json`；站点重命名后应刷新该缓存并同步引用。正式包不依赖旧的 `WTJTreeTesting_folder*` 或 `WTJ_folder*` 图片；历史测试构建与其本地预览素材另行保留，不是正式上传清单。
+
 随后运行 `node scripts/browser-production-qa.cjs`（沿用 `WTW_NODE_MODULES`）；检查使用正式 Lua 输出与正式 JS/CSS，但阻止远程图片请求以稳定验证交互，因此不替代线上图片/字体/加载器和 Scribunto 配额验收。全站加载兼容性报告来自用户导出的 Common.js 与 ResourceLoader 源码；当前使用已有加载路径加载 `MediaWiki:WTJ.js`，无需个人脚本。现有固定切片仅设置每片 15 页/1500000 源码 UTF-8 字节，未实现未来 GUI 可配置的最终 XML 文件大小阈值。
