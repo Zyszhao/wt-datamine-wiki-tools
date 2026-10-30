@@ -1,0 +1,17 @@
+{
+  "namespace": "WTJ",
+  "trees": [
+    "israel_army",
+    "ussr_aviation"
+  ],
+  "vehicles": [
+    {
+      "id": "il_leopard_2a6_hel",
+      "folder": "vehicle-prototype"
+    },
+    {
+      "id": "mig_35",
+      "folder": "vehicle-prototype-mig35"
+    }
+  ]
+}

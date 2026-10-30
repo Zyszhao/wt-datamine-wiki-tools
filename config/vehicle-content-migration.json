@@ -1,0 +1,20 @@
+{
+  "schema": 2,
+  "namespace": "WTJ",
+  "basic_info_sections": [
+    "描述"
+  ],
+  "player_sections": [
+    "载具点评",
+    "历史",
+    "另见",
+    "媒体",
+    "参考"
+  ],
+  "split_pages": {
+    "basic_info": "/basic-info",
+    "player_content": "/player-content"
+  },
+  "basic_info_heading_removed": true,
+  "note": "一次性迁移现有 BWiki 用户编辑段落：描述章节去掉二级标题后进入 /basic-info，载具点评/历史/另见/媒体/参考进入 /player-content。任一目标子页已存在时整任务失败。日常构建永不输出这些用户内容页。"
+}

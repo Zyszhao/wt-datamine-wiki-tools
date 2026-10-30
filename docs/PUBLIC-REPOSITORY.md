@@ -11,3 +11,5 @@ Git 根目录为 wt-wiki，与相邻 War-Thunder-Datamine 原始仓库相互独�
 维护 Git 时用显式路径暂存，并先查看 git diff --cached --stat 和 git diff --cached。不要为了使构建成功而将被忽略的输入或产物强制加入版本库。需要测试输入时使用自建合成夹具，或记录从合法本地输入生成的验证方法。
 
 2026-10-30 冻结补充：可公开的 CODE-AND-FORMATS.md、FREEZE-2026-10-30.md 与 TEST-PAGE-CLEANUP.md 现纳入源码提交；逐页站点修订、清理 API 响应、图片和本机路径配置仍仅本地保存。
+
+冻结完整性复核补充：config/vehicle-examples.json 与 config/vehicle-content-migration.json 是源码自有的示例选择与章节迁移协议，必须随源码跟踪；不包含真实站点页面或游戏数据。

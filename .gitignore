@@ -27,3 +27,9 @@ node_modules/
 !/docs/TEST-PAGE-CLEANUP.md
 !/docs/FREEZE-2026-10-30.md
 !/docs/CODE-AND-FORMATS.md
+
+# Source-owned build/migration configuration; no local paths or game data.
+!/config/
+/config/*
+!/config/vehicle-examples.json
+!/config/vehicle-content-migration.json
