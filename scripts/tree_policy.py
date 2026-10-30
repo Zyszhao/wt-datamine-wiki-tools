@@ -31,6 +31,8 @@ SPECIAL_VARIANTS = {
 }
 
 def exclusion_reason(code, unit_tags):
+    if code.endswith('_killstreak') or code == 'ah_1f_event':
+        return 'user policy: killstreak or ah_1f_event special-mode copy'
     tags = unit_tags.get(code, {})
     if tags.get('operatorCountry') == 'country_invisible':
         return 'unittags.operatorCountry=country_invisible'

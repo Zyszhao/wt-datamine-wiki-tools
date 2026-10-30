@@ -38,6 +38,7 @@ def main():
      ammo_names.setdefault(ammo.casefold(),set()).add(name)
      weapon_ammo.setdefault(str(path.relative_to(REPO)).replace('\\','/').lower(),{}).setdefault(ammo.casefold(),set()).add(name)
  unit_tags=read('char.vromfs.bin_u/config/unittags.blkx')
+ unlocks={u['id']:u for u in read('char.vromfs.bin_u/config/unlocks.blkx')['unlockable'] if 'id' in u}
  units={};placements={};trees={};groups={}
  presentation=json.loads((ROOT/'evidence/presentation-map.json').read_text(encoding='utf-8'))
  # shop range order is significant; preserve folders and flags, never sort columns.
@@ -78,6 +79,10 @@ def main():
   if e['unitClass'] not in BRANCH_CLASSES['army']:
    role=e['unitClass'];category=class_names[role];role_source='wpcost.unitClass + mainmenu/type localization'
   units[code]={'name':text(code+'_shop'),'country':e['country'],'class':e['unitClass'],'category':category,'game_type':role,'category_source':role_source,'rank':e.get('rank'),'br':br}
+  if e['unitClass'] in BRANCH_CLASSES['aviation']:
+   ground_rank=e.get('economicRankTankHistorical')
+   if ground_rank is None:ground_rank=e.get('economicRankHistorical')
+   units[code]['br_ground_rb']=int(ground_rank/3*10+10+0.5)/10 if ground_rank is not None else None
  classes={k:text('mainmenu/type_'+k.removeprefix('exp_')) for k in sorted({r['class'] for r in units.values()})}
  for code,old in presentation['groups'].items():
   if code not in groups:
@@ -156,6 +161,18 @@ def main():
     candidates=[v for v in groups[parent]['members'] if v in in_shop]
     if candidates:edges.append({'from':candidates[-1],'to':u})
   item={'schema':1,'kind':'tech_tree','game_version':version,'id':key,'label':tree_label(country,branch),'country':country,'branch':branch,'columns':columns,'flags':flags,'unplaced':extra,'excluded':excluded,'raw_shop_count':len(raw_shop),'visible_count':len(in_shop),'edges':edges,'ranks':sorted({units[u]['rank'] for u in in_shop if units[u]['rank'] is not None})}
+  if branch=='helicopters':
+   requirements=[]
+   for u,f in flags.items():
+    if not f.get('reqUnlock'):continue
+    unlock=unlocks[f['reqUnlock']]['mode'];conditions=[]
+    if unlock['type']!='char_unlocks' or unlock['num']!=1:raise ValueError('Unsupported helicopter unlock: '+u)
+    for ref in unlock['unlock']:
+     condition=unlocks[ref]['mode']
+     if condition['type']!='char_aircrafts_in_era':raise ValueError('Unsupported helicopter condition: '+ref)
+     conditions.append({'id':ref,**condition})
+    requirements.append({'unit':u,'unlock':f['reqUnlock'],'operator':'any_of','conditions':conditions})
+   item['requirements']=requirements
   item=enrich(item,index,economy,ROOT,REPO);generated[key]=item
   coverage[key]={'country':country,'branch':branch,'raw_shop':len(raw_shop),'visible':len(in_shop),'excluded':excluded,'unplaced':extra,'columns':len(columns),'research_columns':item['layout']['research_columns'],'groups':sum(bool(n['folder']) for c in columns for n in c['nodes']),'category_missing':[u for u in in_shop if not units[u]['category']]}
   save(WORK/('exports/trees/'+key+'_tree_testing.json'),item)
@@ -163,24 +180,69 @@ def main():
  save(WORK/'reports/tree-coverage.json',{'game_version':version,'trees':coverage,'deployed':list(DEPLOY_TREES),'note':'All shop branches generated; only three demo trees packaged. Structural verification is separate from whole-site asset and live-limit certification.'})
  # A small real vehicle record demonstrates shared mod lookup; no display strings/icons here.
  sample={'schema':1,'kind':'vehicle_modifications','game_version':version,'unit':'us_m1a2_abrams',**local['us_m1a2_abrams']}
- out=WIKI;out.mkdir(exist_ok=True);pages=[]
+ out=WIKI;out.mkdir(exist_ok=True);pages=[];page_contents={}
  def page(title,content,model,filename):
   target=out/'pages'/filename;target.parent.mkdir(exist_ok=True);target.write_text(content,encoding='utf-8')
-  pages.append({'title':title,'model':model,'file':'wiki/pages/'+filename,'bytes':len(content.encode())})
+  pages.append({'title':title,'model':model,'file':'wiki/pages/'+filename,'bytes':len(content.encode()),'owner':'generated'})
+  page_contents[title]=content
  for filename,obj in [('vehicles_index_testing.json',index),('modifications_index_testing.json',modindex),*[(key+'_tree_testing.json',generated[key]) for key in DEPLOY_TREES],('us_m1a2_modifications_testing.json',sample)]:
   content=dump(obj)
   if max(len(content.encode()),len(json.dumps(obj,ensure_ascii=False,indent=4).encode()))>=MAX:raise ValueError(filename+' exceeds site article limit (compact or formatted)')
   page(PREFIX+'/data/'+filename,content,'json',filename)
+ # Ship the article/component dependencies with the same testing import.
+ from vehicle_page import write_output, load_json, merge_ordnance_pages
+ article_routes={}
+ article_config=load_json(ROOT/'config/vehicle-examples.json')
+ if article_config['namespace']!='WTJ':raise ValueError('Formal article namespace must be WTJ')
+ article_page_titles=set()
+ for example in article_config['vehicles']:
+  code,folder=example['id'],example['folder']
+  bundle=write_output(code,article_config['namespace'],WIKI/folder,REPO)
+  for item in bundle['pages']:
+   if item['title'].endswith(('/user-content','/basic-info','/player-content')) or item.get('owner')!='generated':
+    raise ValueError('常规构建不得包含玩家编辑页：'+item['title'])
+   existing=next((p for p in pages if p['title']==item['title']),None)
+   if existing:
+    if '/data/ordnance/' in item['title'] and existing['model']==item['model']=='json':
+     merged=merge_ordnance_pages(page_contents[item['title']],item['content'])
+     (ROOT/existing['file']).write_text(merged,encoding='utf-8')
+     existing['bytes']=len(merged.encode('utf-8'));page_contents[item['title']]=merged
+     article_page_titles.add(item['title']);continue
+    if page_contents[item['title']]!=item['content'] or existing['model']!=item['model']:
+     raise ValueError('重复页面标题内容不一致：'+item['title'])
+    article_page_titles.add(item['title']);continue
+   filename=('article_vehicle_'+code+'.wiki' if item['title']==code
+             else 'article_'+item['file'].replace('/','_'))
+   page(item['title'],item['content'],item['model'],filename)
+   article_page_titles.add(item['title'])
+  article_routes[code]=code
+  units[code]['local_page']=article_routes[code]
+ save(out/'pages/vehicles_index_testing.json',index)
+ for item in pages:
+  if item['title']==PREFIX+'/data/vehicles_index_testing.json':item['bytes']=(ROOT/item['file']).stat().st_size
  page('模块:'+PREFIX+'/catalogue',(ROOT/'src/catalogue.lua').read_text(encoding='utf-8'),'Scribunto','catalogue.lua')
  css=(ROOT/'src/tree.css').read_text(encoding='utf-8').replace('}}','} }')
  page('模板:'+PREFIX+'/styles','<includeonly>{{ResourceLoader|'+PREFIX+'}}\n{{#css:\n'+css+'\n}}</includeonly>','wikitext','styles.wiki')
  page('MediaWiki:'+PREFIX+'.js',(ROOT/'src/tree.js').read_text(encoding='utf-8'),'javascript','tree_testing.js')
  for title,fn in [*[(key+'_tree_testing','tree') for key in DEPLOY_TREES],('us_m1a2_modifications_testing','modifications'),('diagnostics_testing','check')]:
   content='__NOINDEX__\n__NOTOC__\n{{'+PREFIX+'/styles}}\n{{#invoke:'+PREFIX+'/catalogue|'+fn+('|tree='+title.removesuffix('_testing') if fn=='tree' else '')+'}}\n'
+  if fn=='modifications':content='__NOINDEX__\n{{'+PREFIX+'/modifications|id=il_leopard_2a6_hel}}\n'
   page(PREFIX+'/'+title,content,'wikitext',title+'.wiki')
  # Full USA per-unit costs/positions are an offline export, not read by the tech tree.
+ for key in article_config['trees']:
+  page(PREFIX+'/data/'+key+'_tree_testing.json',dump(generated[key]),'json',key+'_tree_testing.json')
+  page(PREFIX+'/'+key+'_tree_testing','__NOINDEX__\n__NOTOC__\n{{'+PREFIX+'/styles}}\n{{#invoke:'+PREFIX+'/catalogue|tree|tree='+key+'_tree}}\n','wikitext',key+'_tree_testing.wiki')
  save(WORK/'exports/usa_army_local_modifications.json',{'game_version':version,'records':{u:local[u] for u in sorted(us)}})
  upload={}
+ for folder in (example['folder'] for example in article_config['vehicles']):
+  for filename,info in load_json(WIKI/folder/'manifest.json')['uploads'].items():
+   src=Path(info['source'])
+   target=WIKI/'uploads'/filename
+   shutil.copyfile(WIKI/folder/'uploads'/filename,target)
+   # The isolated article exporter may transform the hero image.
+   asset=WORK/'assets'/filename
+   shutil.copyfile(target,asset)
+   upload[filename]='@work/assets/'+filename
  for item in sample['modifications']:
   r=registry[item['ref']];icons=r['icons'];icon=icon_registry.get(icons.get('image_tank') or icons.get('image'))
   if icon and icon['source']:
@@ -190,7 +252,7 @@ def main():
  for obsolete in ('WTJTreeTesting_us_m551_football.png','WTJTreeTesting_us_m8_scott_snowball.png'):
   old=WIKI/'uploads'/obsolete
   if old.exists():shutil.move(str(old),str(WORK/'assets'/obsolete))
- for filename,source in upload.items():shutil.copyfile(REPO/source,WIKI/'uploads'/filename)
+ for filename,source in upload.items():shutil.copyfile((ROOT/source[1:]) if source.startswith('@') else REPO/source,WIKI/'uploads'/filename)
  for key in DEPLOY_TREES:
   item=generated[key];visible={u for c in item['columns'] for n in c['nodes'] for u in n['units']}
   used=visible | {n['folder'] for c in item['columns'] for n in c['nodes'] if n['folder']}
@@ -202,6 +264,16 @@ def main():
  for filename in ('WTJTreeTesting_folder.png','WTJTreeTesting_folder_prem.png'):
   shutil.copyfile(WORK/'assets'/filename,WIKI/'uploads'/filename)
   upload[filename]='@work/assets/'+filename
+ # Retire stale generated uploads when a naming policy changes.
+ current_pages={Path(p['file']).name for p in pages}
+ stale=[p for p in (WIKI/'uploads').iterdir() if p.name not in upload]
+ stale += [p for p in (WIKI/'pages').iterdir() if p.is_file() and p.name not in current_pages]
+ if stale:
+  import uuid
+  archive=WORK/'history'/('obsolete-generated-uploads-'+uuid.uuid4().hex[:8]);archive.mkdir(parents=True)
+  for p in stale:
+   retired=archive/p.parent.name/p.name;retired.parent.mkdir(exist_ok=True)
+   shutil.move(str(p),str(retired))
  save(out/'manifest.json',report)
  sources=['char.vromfs.bin_u/config/shop.blkx','char.vromfs.bin_u/config/wpcost.blkx','char.vromfs.bin_u/config/unittags.blkx','char.vromfs.bin_u/config/modifications.blkx','lang.vromfs.bin_u/lang/units.csv','lang.vromfs.bin_u/lang/units_modifications.csv','lang.vromfs.bin_u/lang/units_weaponry.csv']
  save(WORK/'reports/sources.json',{p:hashlib.sha256((REPO/p).read_bytes()).hexdigest() for p in sources})
@@ -228,6 +300,8 @@ def main():
  ET.ElementTree(tree_xml).write(out/'import-tree-only.xml',encoding='utf-8',xml_declaration=True)
  update=ET.Element('{'+ns+'}mediawiki',{'version':'0.11'})
  update_titles={PREFIX+'/data/vehicles_index_testing.json',*[PREFIX+'/data/'+key+'_tree_testing.json' for key in DEPLOY_TREES],*[PREFIX+'/'+key+'_tree_testing' for key in DEPLOY_TREES],'模块:'+PREFIX+'/catalogue','模板:'+PREFIX+'/styles','MediaWiki:'+PREFIX+'.js'}
+ update_titles.update(article_page_titles)
+ if any(title.endswith(('/user-content','/basic-info','/player-content')) for title in update_titles):raise ValueError('更新集合误含玩家编辑子页。')
  for pe in xml:
   if pe.tag!='{'+ns+'}page':continue
   if pe.find('{'+ns+'}title').text in update_titles:update.append(pe)
@@ -242,5 +316,10 @@ def main():
   if filename in ('WTJTreeTesting_a6m5_zero_china.png','WTJTreeTesting_pe-2-359_china.png','WTJTreeTesting_germ_s_700_s_706.png'):lines.append('- `文件:'+filename+'` ← [本地图片](uploads/'+filename+')')
  (WIKI/'PAGE-LIST.md').write_text('\n'.join(lines),encoding='utf-8')
  render(pages)
+ from testing_cleanup import write_cleanup
+ write_cleanup(WIKI/'Cleanup', [p['title'] for p in pages] + ['文件:'+name for name in upload],
+               active_contents=[(ROOT/p['file']).read_text(encoding='utf-8') for p in pages])
+ with (WIKI/'PAGE-LIST.md').open('a',encoding='utf-8') as stream:
+  stream.write('\n\n## 历史测试页清理（每次导入必做）\n\n见 [清理要求](Cleanup/CLEANUP.md) 和 [管理员入口](Cleanup/CLEANUP.html)。当前测试标题须先迁移到确定的正式标题，验收后删除；不能把此历史原型作为默认正式交付。\n')
  print(dump({k:v for k,v in report.items() if k not in ['pages','unresolved_icons','uploads']}))
 if __name__=='__main__':main()

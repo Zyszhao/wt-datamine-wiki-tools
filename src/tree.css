@@ -60,6 +60,7 @@
 
 /* Keep tree cards inside balanced edges and let flat lists use the whole row. */
 .wtt-toolbar{gap:8px 12px;padding:12px 14px}
+.wtt-version{margin-left:auto;font-size:12px;color:#666;white-space:nowrap}
 .wtt-filters{display:grid;grid-template-columns:minmax(180px,1fr) auto auto auto auto auto;gap:8px;align-items:stretch}
 .wtt-filters input{width:100%}
 .wtt-filters select,.wtt-filters button,.wtt-br-filter>summary{height:36px;box-sizing:border-box;white-space:nowrap}
@@ -72,3 +73,14 @@
 @media(max-width:850px){.wtt-filters{grid-template-columns:repeat(5,minmax(0,1fr))}.wtt-filters input{grid-column:1/-1}.wtt-filters select,.wtt-filters button,.wtt-br-filter>summary{width:100%;padding-left:5px;padding-right:5px;font-size:12px}.wtt-br-ranges{right:0}}
 @media(max-width:480px){.wtt-toolbar{padding:10px}.wtt-filters{grid-template-columns:repeat(3,minmax(0,1fr))}.wtt-modes{margin-left:auto}.wtt-br-filter{position:static}.wtt-filters{position:relative}.wtt-br-ranges{top:100%;max-width:calc(100vw - 64px)}}
 @media(max-width:480px){.wtt-br-filter[open]{grid-column:1/-1}.wtt-br-ranges{position:static;width:100%;max-width:100%;margin-top:8px}}
+
+.wtt-requirement{background:#e9eef1;color:#243b49;padding:12px 14px;border-left:4px solid #638694;font-size:14px}
+.wtt-popup-gap{height:30px}.wtt-popup-edge{display:none}.wtt-popup-lines{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.wtt.wtt-list .wtt-popup-gap,.wtt.wtt-list .wtt-popup-lines{display:none!important}
+
+/* Keep all controls available while scrolling within this tree. */
+.wtt-toolbar{position:sticky;top:0;z-index:100;box-shadow:0 2px 5px #0002}
+.wtt-modes{flex-wrap:wrap}
+.wtt[data-mode=grb] .wtt-mode[data-mode=grb]{background:#36424e;color:white}
+.wtt[data-mode=grb] .wtt-br-grb{display:block}
+.wtt-br-ranges{max-height:60vh;overflow-y:auto}
+@media(max-width:480px){.wtt-br-ranges{max-height:45vh}}

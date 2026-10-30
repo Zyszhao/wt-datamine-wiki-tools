@@ -1,0 +1,392 @@
+"""Audit all exported modification/loadout/card images against BWiki, read-only.
+
+Output stays local. Small images and icons preserve source names; large cards
+use the site-wide _资料卡 suffix. All source bytes are preserved.
+"""
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import re
+import shutil
+import struct
+import time
+
+from paths import REPO, WIKI, WORK, IMPORT_PACK, reset_import_pack
+from asset_naming import vehicle_image_name, mediawiki_file_key
+from vehicle_demo_pack import query
+
+OUT = WIKI / 'production/game-image-audit'
+STAGE = OUT / 'images'
+LABELS = {'modification': '改装件', 'loadout': '挂载', 'vehicle_card': '资料卡'}
+LOADOUT_FAMILIES = ('bombs_', 'guided_bomb', 'glide_bomb', 'glide_guided_bomb',
+                    'missile_air_to_', 'missile_type_', 'rockets_', 'nar_', 'atgm_',
+                    'air_torpedo', 'multibarrel_', 'ptb_', 'napalm_', 'ltc_',
+                    'targeting_pod', 'rls_type_')
+
+
+def dump(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+
+def wiki_key(name):
+    return mediawiki_file_key(name)
+
+
+def image_meta(path):
+    raw = path.read_bytes()
+    result = {'sha256': hashlib.sha256(raw).hexdigest(), 'sha1': hashlib.sha1(raw).hexdigest(), 'bytes': len(raw)}
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        result['width'], result['height'] = struct.unpack('>II', raw[16:24])
+    return result
+
+
+def inventory():
+    assets, unavailable = {}, []
+    atlas = REPO / 'atlases.vromfs.bin_u/gameuiskin'
+
+    def add(path, kind, reference, variant='original'):
+        target_name = vehicle_image_name(path.name, large=variant == 'large') if kind == 'vehicle_card' else path.name
+        key = wiki_key(target_name)
+        item = assets.setdefault(key, {'filename': target_name, 'kinds': [], 'sources': [], 'references': []})
+        if kind not in item['kinds']:
+            item['kinds'].append(kind)
+        rel = path.relative_to(REPO).as_posix()
+        if not any(s['path'] == rel for s in item['sources']):
+            item['sources'].append({'path': rel, 'variant': variant, **image_meta(path)})
+        item['references'].append(reference)
+
+    def resolve(value, kind, reference):
+        name = str(value).split('#')[-1].lstrip('!')
+        original = atlas / name
+        source = original if original.is_file() else next(
+            (atlas / (Path(name).stem + ext) for ext in ('.png', '.svg', '.avif')
+             if (atlas / (Path(name).stem + ext)).is_file()), None)
+        if source:
+            add(source, kind, reference)
+        else:
+            unavailable.append({'kind': kind, 'reference': reference, 'image': value})
+
+    # Include SVG assets as well as PNG. The game often asks for .avif while
+    # the exporter provides .png; use the actual exported basename/extension.
+    path = REPO / 'char.vromfs.bin_u/config/modifications.blkx'
+    definitions = json.loads(path.read_text(encoding='utf-8-sig'))['modifications']
+    for name, block in definitions.items():
+        if isinstance(block, dict) and block.get('image'):
+            resolve(block['image'], 'modification', f'{path.relative_to(REPO).as_posix()}#modifications/{name}/image')
+    path = REPO / 'char.vromfs.bin_u/config/wpcost.blkx'
+    for unit, entry in json.loads(path.read_text(encoding='utf-8-sig')).items():
+        if not isinstance(entry, dict):
+            continue
+        for name, block in entry.get('modifications', {}).items():
+            if isinstance(block, dict) and block.get('image'):
+                resolve(block['image'], 'modification', f'{path.relative_to(REPO).as_posix()}#{unit}/modifications/{name}/image')
+
+    def walk(value, location, source):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                pointer = location + '/' + key
+                if key == 'iconType':
+                    for icon in child if isinstance(child, list) else [child]:
+                        if isinstance(icon, str) and icon:
+                            resolve(icon, 'loadout', source + '#' + pointer)
+                elif isinstance(child, (dict, list)):
+                    walk(child, pointer, source)
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                walk(child, location + '/' + str(index), source)
+
+    scanned = 0
+    for path in sorted((REPO / 'aces.vromfs.bin_u/gamedata').rglob('*.blkx')):
+        raw = path.read_text(encoding='utf-8-sig')
+        scanned += 1
+        if '"iconType"' in raw:
+            walk(json.loads(raw), '', path.relative_to(REPO).as_posix())
+
+    # getTierIcon also constructs names when the vehicle has no iconType.
+    # Restrict patterns to those generated by that function, not HUD icons.
+    rule = 'gui.vromfs.bin_u/scripts/weaponry/weaponrypresetsparams.nut#getTierIcon'
+    fallback = {'air_torpedo', 'atgm_type2_x2', 'machine_gun', 'multibarrel_gun',
+                'missile_air_to_earth', 'missile_air_to_air', 'missile_air_to_air_group', 'ltc'}
+    gui = json.loads((REPO / 'aces.vromfs.bin_u/config/gui.blkx').read_text(encoding='utf-8-sig'))
+    sizes = '|'.join(re.escape(s['id']) for s in gui['weaponrySizes']['size'])
+    for path in atlas.iterdir():
+        if re.fullmatch(r'(bombs|rockets|nar|mines|smoke|turrets)_(' + sizes + r')(_group)?', path.stem):
+            fallback.add(path.stem)
+    for name in sorted(fallback):
+        resolve(name, 'loadout', rule)
+
+    # Exported legacy/future combinations need not have a current iconType.
+    # Keep these explicit family candidates separate from confirmed references.
+    for path in sorted(atlas.glob('*.png')):
+        if path.name.startswith(LOADOUT_FAMILIES) and wiki_key(path.name) not in assets:
+            add(path, 'loadout', 'atlas family candidate; no current iconType or getTierIcon reference found', 'unreferenced')
+
+    # Every small unit/group card, plus the larger stat-card illustrations.
+    for path in sorted((REPO / 'atlases.vromfs.bin_u/units').glob('*.png')):
+        add(path, 'vehicle_card', 'exported unit/group card', 'small')
+    for folder in ('aircrafts', 'tanks', 'ships', 'groups'):
+        for path in sorted((REPO / ('tex.vromfs.bin_u/' + folder)).glob('*.png')):
+            add(path, 'vehicle_card', 'exported stat-card illustration', 'large')
+    for item in assets.values():
+        item['references'] = sorted(set(item['references']))
+        item['titles'] = ['文件:' + item['filename']]
+        if 'modification' in item['kinds']:
+            item['titles'].append('文件:Mods ' + item['filename'].replace('_', ' '))
+    result = {'datamine': str(REPO), 'datamine_version': (REPO / 'version').read_text(encoding='utf-8').strip(),
+              'scanned_gamedata_files': scanned,
+              'assets': list(assets.values()), 'unavailable': unavailable}
+    dump(OUT / 'inventory.json', result)
+    return result
+
+
+def audit_titles(titles, refresh=False):
+    cache = OUT / 'site-evidence.json'
+    previous = json.loads(cache.read_text(encoding='utf-8')) if cache.is_file() and not refresh else {'targets': {}}
+    records = previous['targets']
+    # Resume only recent evidence, not stale records from a previous game run.
+    now = time.time()
+    pending = [title for title in titles if title not in records or records[title]['status'] == 'unknown'
+               or now - records[title].get('checked_unix', 0) > 6 * 3600]
+    batches = [pending[start:start + 15] for start in range(0, len(pending), 15)]
+    print(f'Querying {len(pending)} file titles in {len(batches)} batches (read-only)', flush=True)
+
+    def fetch(batch):
+        result = {}
+        remaining = batch
+        for attempt in range(3):
+            result.update(query(remaining))
+            remaining = [title for title, record in result.items() if record['status'] == 'unknown']
+            if not remaining:
+                break
+            time.sleep(1 + attempt * 2)
+        stamp = datetime.now(timezone.utc).isoformat()
+        for record in result.values():
+            record.update(checked_at=stamp, checked_unix=time.time())
+        return result
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(fetch, batch) for batch in batches]
+        for count, future in enumerate(as_completed(futures), 1):
+            records.update(future.result())
+            if count % 10 == 0 or count == len(batches):
+                dump(cache, {'read_only': True, 'targets': records})
+                print(f'File query batches {count}/{len(batches)}', flush=True)
+    dump(cache, {'read_only': True, 'targets': records})
+    return {title: records[title] for title in titles}
+
+
+def build_report(data, evidence):
+    if STAGE.exists():
+        if STAGE.resolve() != OUT.resolve() / 'images' or STAGE.is_symlink():
+            raise ValueError('Unsafe staging path')
+        shutil.rmtree(STAGE)
+    rows, copied = [], []
+    for item in data['assets']:
+        checks = [evidence[t] for t in item['titles']]
+        found = next((r for r in checks if r.get('record', {}).get('imageinfo')), None)
+        if found:
+            item['status'] = 'existing_original' if checks[0].get('record', {}).get('imageinfo') else 'existing_alias'
+            item['wiki_file'] = found['record']['title']
+            item['imageinfo'] = found['record']['imageinfo'][0]
+        elif any(c['status'] == 'unknown' for c in checks):
+            item['status'] = 'unknown'
+        else:
+            item['status'] = 'missing'
+        for source in item['sources']:
+            relative = None
+            if item['status'] == 'missing':
+                kind = 'modification' if 'modification' in item['kinds'] else item['kinds'][0]
+                folder = {'modification': 'Modifications', 'loadout': 'Loadouts',
+                          'vehicle_card': 'VehicleCards-' + source['variant'].capitalize()}[kind]
+                if kind == 'loadout' and source['variant'] == 'unreferenced':
+                    folder = 'Loadouts-Unreferenced'
+                relative = folder + '/' + item['filename']
+                target = STAGE / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if target.exists() and image_meta(target)['sha256'] != source['sha256']:
+                    raise ValueError('Conflicting original names: ' + relative)
+                shutil.copyfile(REPO / source['path'], target)
+                copied.append({'file': relative, 'filename': item['filename'], 'kind': kind,
+                               'source': source['path'], **image_meta(target)})
+            rows.append({'filename': item['filename'], 'kinds': ';'.join(item['kinds']), 'variant': source['variant'],
+                         'status': item['status'], 'wiki_file': item.get('wiki_file', ''),
+                         'local_size': f"{source.get('width', '')}x{source.get('height', '')}",
+                         'site_size': f"{item.get('imageinfo', {}).get('width', '')}x{item.get('imageinfo', {}).get('height', '')}",
+                         'source': source['path'], 'sha256': source['sha256'], 'staged_file': relative or ''})
+    with (OUT / 'ALL-IMAGES.csv').open('w', encoding='utf-8-sig', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    summary = {kind: dict(Counter(a['status'] for a in data['assets'] if kind in a['kinds'])) for kind in LABELS}
+    report = {'created_at': datetime.now(timezone.utc).isoformat(), 'read_only': True, 'live_wiki_written': False,
+              'datamine': str(REPO), 'datamine_version': data.get('datamine_version'),
+              'scanned_gamedata_files': data['scanned_gamedata_files'],
+              'counts': summary, 'unavailable': data['unavailable'], 'assets': data['assets'], 'staged_files': copied}
+    report['missing_loadout_current_references'] = sum(a['status'] == 'missing' and 'loadout' in a['kinds']
+        and any(s['variant'] != 'unreferenced' for s in a['sources']) for a in data['assets'])
+    report['missing_loadout_unreferenced_family'] = sum(a['status'] == 'missing' and 'loadout' in a['kinds']
+        and all(s['variant'] == 'unreferenced' for s in a['sources']) for a in data['assets'])
+    dump(OUT / 'manifest.json', report)
+    lines = ['# 全拆包图片补充上传清单', '', f"核验时间（UTC）：{report['created_at']}。仅查询文件信息，没有线上写入。", '',
+             '| 类别 | 不同原名 | 原名已有 | 已有 Mods 别名 | 确认缺失 | 待确认 |', '|---|---:|---:|---:|---:|---:|']
+    for kind, counts in summary.items():
+        lines.append(f"| {LABELS[kind]} | {sum(counts.values())} | {counts.get('existing_original', 0)} | {counts.get('existing_alias', 0)} | {counts.get('missing', 0)} | {counts.get('unknown', 0)} |")
+    lines += ['', f"挂载缺图分为：有当前配置／游戏回退规则引用 {report['missing_loadout_current_references']} 张；仅见于挂载图集同族文件、未发现当前引用 {report['missing_loadout_unreferenced_family']} 张。后者单独目录供补充图库，不能当作已投入使用的挂载证明。"]
+    lines += ['', '## 范围和命名', '',
+              '- 改装：全局改装定义及 wpcost 每车图片覆盖，包含实际导出的 PNG、SVG。',
+              '- 挂载：遍历全部 gamedata BLK 的 iconType（包括载具预设、挂点和武器），补充游戏 getTierIcon 的回退图标；不是只查三个演示载具。',
+              '- 另查挂载图集同族 PNG；尚未发现当前配置引用的组合图单列 Loadouts-Unreferenced，不宣称已有载具实际使用。',
+              '- 资料卡：atlases/units 小图保留 `<代码>.png`；tex/aircrafts、tanks、ships、groups 大图统一为 `<代码>_资料卡.png`，可与小图同时上传。',
+              '- 改装、挂载、小图保留拆包原名；大图统一添加 _资料卡 后缀。原始字节和扩展名保持不变，逐图校验 SHA-256。',
+              '- 查询原名并解析标题规范化和重定向；改装另查 Mods 别名。有可复用别名的图片不重复上传。',
+              '- “缺失”指这些名称下均无 imageinfo，不能排除站内存在其他人工改名的等价图片。查询失败单列待确认。',
+              '- 小图和大图按不同目标名分别查询，不以大图覆盖代码同名小图；尺寸与来源见 ALL-IMAGES.csv。',
+              '- 资料卡交付分为 VehicleCards-Small / VehicleCards-Large；大图已有固定后缀，两个目录可一并上传。',
+              '- 本补充检查不改变载具页图标归属：显示图标仍随每车挂点/预设配置，共享武器表只存参数。', '',
+              '## 确认缺失的改装件与挂载图标', '', '| 原名 | 用途 |', '|---|---|']
+    for item in data['assets']:
+        if item['status'] == 'missing' and 'vehicle_card' not in item['kinds']:
+            lines.append(f"| `{item['filename']}` | {'、'.join(LABELS[k] for k in item['kinds'])} |")
+    lines += ['', '## 资料卡缺失原名', '',
+              '含载具、分组及特殊模式素材；tomoe_、md_ 前缀和占位／随机图片保留，不冒充普通科技树新增载具。', '',
+              ', '.join('`' + a['filename'] + '`' for a in data['assets']
+                                                   if a['status'] == 'missing' and 'vehicle_card' in a['kinds']), '',
+              '## 文件与证据', '', '- ALL-IMAGES.csv：全部原名、尺寸、来源、站内状态和暂存路径。',
+              '- manifest.json：逐图用途、游戏配置引用、字节数和哈希。', '- site-evidence.json：逐批只读 API 文件记录。',
+              '- inventory.json：本地遍历结果；未导出或无法定位的引用另列，不计入可上传图片。']
+    (OUT / 'UPLOAD-LIST.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+    return report
+
+
+def verify(report):
+    from xml.etree import ElementTree as ET
+    from PIL import Image
+    expected = {item['file'] for item in report['staged_files']}
+    actual = {p.relative_to(STAGE).as_posix() for p in STAGE.rglob('*') if p.is_file()}
+    assert actual == expected
+    for item in report['staged_files']:
+        assert Path(item['file']).name == item['filename']
+        source_name = Path(item['source']).name
+        assert item['filename'] == (vehicle_image_name(source_name, large=True) if item['file'].startswith('VehicleCards-Large/') else source_name)
+        assert image_meta(STAGE / item['file'])['sha256'] == item['sha256'] == image_meta(REPO / item['source'])['sha256']
+        if Path(item['file']).suffix == '.png':
+            with Image.open(STAGE / item['file']) as image:
+                image.verify()
+        elif Path(item['file']).suffix == '.svg':
+            assert ET.parse(STAGE / item['file']).getroot().tag.endswith('svg')
+    unknown = [a['filename'] for a in report['assets'] if a['status'] == 'unknown']
+    result = {'passed': not unknown, 'image_naming_policy': 'small=original; large=_资料卡; other=original', 'original_bytes': True,
+              'staged_files': len(actual), 'image_decode_or_svg_parse': True,
+              'unknown': unknown, 'counts': report['counts']}
+    dump(OUT / 'VALIDATION.json', result)
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return not unknown
+
+
+def publish(report, card_variant):
+    # Rebuild the single agreed delivery directory, retaining the verified
+    # current XML/demo files, and replacing this supplemental asset subtree.
+    pack = IMPORT_PACK.resolve()
+    if pack != IMPORT_PACK.parent.resolve() / 'ImportPack' or IMPORT_PACK.is_symlink():
+        raise ValueError('Unsafe ImportPack')
+    from xml.etree import ElementTree as ET
+    for xml in pack.rglob('*.xml'):
+        for node in ET.parse(xml).iter():
+            if node.tag.rsplit('}', 1)[-1] == 'title' and re.search(r'Testing|Demo2026', node.text or ''):
+                raise ValueError('先迁移历史测试标题，不能将旧测试 XML 保留为默认交付：' + str(xml))
+    backup = WORK / 'history' / ('ImportPack-before-image-audit-' + datetime.now().strftime('%Y%m%d-%H%M%S'))
+    shutil.copytree(pack, backup)
+    reset_import_pack()
+    for source in backup.iterdir():
+        if source.name == 'SupplementalImages':
+            continue
+        if source.is_dir():
+            shutil.copytree(source, pack / source.name)
+        else:
+            shutil.copyfile(source, pack / source.name)
+    delivered, already_delivered = [], []
+    for record in report['staged_files']:
+        folder = record['file'].split('/')[0]
+        if folder.startswith('VehicleCards-') and card_variant != 'both' and folder != 'VehicleCards-' + card_variant.capitalize():
+            continue
+        existing = pack / record['filename']
+        if existing.is_file():
+            assert image_meta(existing)['sha256'] == record['sha256']
+            already_delivered.append(record['filename'])
+            continue
+        target = pack / 'SupplementalImages' / record['file']
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(STAGE / record['file'], target)
+        assert image_meta(target)['sha256'] == record['sha256']
+        delivered.append(record['file'])
+    # Confirm preservation of the active formal delivery, including XML.
+    preserved = [p for p in backup.rglob('*') if p.is_file() and 'SupplementalImages' not in p.relative_to(backup).parts]
+    for source in preserved:
+        assert hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256((pack / source.relative_to(backup)).read_bytes()).digest()
+    delivery = {'import_pack': str(pack), 'backup': str(backup),
+                'card_variant': card_variant, 'files': delivered, 'count': len(delivered),
+                'distinct_wiki_names': len({Path(p).name for p in delivered}),
+                'already_in_pack_root': already_delivered,
+                'preserved_active_files': len(preserved), 'preserved_active_hashes': True}
+    dump(OUT / 'DELIVERY.json', delivery)
+    with (OUT / 'DELIVERY-LIST.csv').open('w', encoding='utf-8-sig', newline='') as stream:
+        writer = csv.DictWriter(stream, fieldnames=['path', 'wiki_filename', 'sha256', 'variant'])
+        writer.writeheader()
+        for item in report['staged_files']:
+            if item['file'] in delivered:
+                writer.writerow({'path': str(pack / 'SupplementalImages' / item['file']),
+                                 'wiki_filename': item['filename'], 'sha256': item['sha256'],
+                                 'variant': item['file'].split('/')[0]})
+    lines = ['# 本次图片交付', '', f"目录：`{pack / 'SupplementalImages'}`。小图、改装及挂载保留拆包原名；大图统一添加 _资料卡 后缀，所有图片保留原始字节。", '',
+             '| 子目录 | 文件数 | 上传说明 |', '|---|---:|---|']
+    descriptions = {'Modifications': '确认缺失的改装图标；逐文件格式见 DELIVERY-LIST.csv',
+                    'Loadouts': '确认缺失、有当前配置或游戏回退规则引用的挂载图标',
+                    'Loadouts-Unreferenced': '确认缺失、尚未发现当前配置引用的挂载同族图',
+                    'VehicleCards-Small': '科技树小图，保留拆包原名',
+                    'VehicleCards-Large': '资料卡大图，统一添加 _资料卡 后缀'}
+    for folder, count in sorted(Counter(p.split('/')[0] for p in delivered).items()):
+        lines.append(f'| `{folder}` | {count} | {descriptions[folder]} |')
+    lines += ['', f"补充目录交付 {len(delivered)} 个文件；另有 {len(already_delivered)} 张已在 ImportPack 根目录交付，同名同内容不再重复复制。",
+              '大图与小图目标名不同，可以一并上传，不互相覆盖。',
+              '所有站内已有同名图片及可复用 Mods 别名的图片均未放入本补充目录。',
+              '含特殊模式、分组和随机占位素材，完整来源及尺寸见 ALL-IMAGES.csv。',
+              '站内核对依赖原名、Mods 别名与重定向；未排除其他人工改名的等价文件。', '',
+              '既有正式导入文件保留并逐文件核对哈希；历史测试包不得作为正式交付。',
+              f'本次重建前的本地备份：`{backup}`。', '',
+              '每次导入必做：先备份，验收替代资源后检查链入并删除旧测试标题，随后核对删除结果。见 [清理说明](Cleanup/CLEANUP.md) 和 [管理员入口](Cleanup/CLEANUP.html)。', '',
+              'DELIVERY-LIST.csv 给出逐文件绝对路径、上传名、哈希和所属候选目录；UPLOAD-LIST.md 给出完整检查范围及差集。']
+    (OUT / 'DELIVERY.md').write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--refresh', action='store_true')
+    parser.add_argument('--reuse-inventory', action='store_true')
+    parser.add_argument('--publish', action='store_true')
+    parser.add_argument('--card-variant', choices=('small', 'large', 'none', 'both'), default='both')
+    args = parser.parse_args()
+    OUT.mkdir(parents=True, exist_ok=True)
+    data = json.loads((OUT / 'inventory.json').read_text(encoding='utf-8')) if args.reuse_inventory else inventory()
+    print(f"Inventory: {len(data['assets'])} original names, {len(data['unavailable'])} unavailable references", flush=True)
+    titles = sorted({title for item in data['assets'] for title in item['titles']})
+    report = build_report(data, audit_titles(titles, args.refresh))
+    from testing_cleanup import write_cleanup
+    write_cleanup(OUT / 'Cleanup', ['文件:' + a['filename'] for a in report['assets']])
+    with (OUT / 'UPLOAD-LIST.md').open('a', encoding='utf-8') as stream:
+        stream.write('\n## 每次导入必做：历史测试页清理\n\n先备份并验收替代页，再检查依赖和文件用途后删除旧测试页，最后核对删除结果。见 [说明](Cleanup/CLEANUP.md) 和 [管理员入口](Cleanup/CLEANUP.html)。本地交付不表示已执行线上删除。\n')
+    if not verify(report):
+        raise SystemExit('Unresolved file queries; no publish')
+    if args.publish:
+        publish(report, args.card_variant)
+
+
+if __name__ == '__main__':
+    main()

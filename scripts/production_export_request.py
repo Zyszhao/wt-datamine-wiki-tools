@@ -11,12 +11,14 @@ def main():
              ('陆军' if branch == 'army' else BRANCHES[branch])
              for country, branches in shop.items() for branch in branches
              if branch != 'helicopters']
+    trees += [COUNTRIES[country.removeprefix('country_')] + BRANCHES['helicopters']
+              for country, branches in shop.items() if 'helicopters' in branches]
     support = ['MediaWiki:Common.js', 'MediaWiki:Common.css',
                '模板:ResourceLoader', '模板:Tree-Start', '模板:Tree-End',
                '模板:Tree-Unit', '模板:Tree-Group', '模板:Tree-Arrow',
                '模板:tr', '模板:UnitTypeIcon']
     titles = list(dict.fromkeys(trees + support))
-    assert len(trees) == 34 and len(titles) == 44
+    assert len(trees) == 44 and len(titles) == 54
     output = WORK / 'exports/production-source-request'
     output.mkdir(parents=True, exist_ok=True)
     # No BOM, headings, blank lines, URL encoding, or bullet markers in the list.
@@ -50,6 +52,10 @@ def main():
     # Confirmed references in the user's 2026-10-23 export, not guessed titles.
     (output / 'BWiki-Special-Export-additional-pages.txt').write_text(
         '模板:Tr/db\n模块:Tr\n', encoding='utf-8')
+    from testing_cleanup import write_cleanup
+    write_cleanup(output / 'Cleanup')
+    with (output / 'README.md').open('a', encoding='utf-8') as stream:
+        stream.write('\n## 历史测试页备份与清理\n\n另见 [清理清单](Cleanup/CLEANUP.md) 和 [管理员入口](Cleanup/CLEANUP.html)。这是独立的备份/退休清单，不混入正式源码请求。导入替代页并验收后须删除退休页。\n')
     print(json.dumps({'trees': len(trees), 'support': len(support), 'titles': len(titles),
                       'directory': str(output)}, ensure_ascii=False))
 

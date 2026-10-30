@@ -15,7 +15,7 @@ def enrich(tree,index,economy,root,repo,presentation=None):
     asset(n['folder'])
    for code in n['units']:asset(code)
  for code in tree['unplaced']:asset(code)
- tree['presentation']={u:{'name':vehicles.get(u,{}).get('name') or index['records'][u]['name'],'type_icon':vehicles.get(u,{}).get('type_icon'),'existing_page':vehicles.get(u,{}).get('page'),'status':vehicles.get(u,{}).get('status') or ('squadron' if tree['flags'].get(u,{}).get('isClanVehicle') else 'premium' if economy[u].get('costGold',0)>0 else 'research')} for u in assets if u in index['records']}
+ tree['presentation']={u:{'name':vehicles.get(u,{}).get('name') or index['records'][u]['name'],'type_icon':vehicles.get(u,{}).get('type_icon'),'type_key':vehicles.get(u,{}).get('type_key'),'existing_page':vehicles.get(u,{}).get('page'),'status':vehicles.get(u,{}).get('status') or ('squadron' if tree['flags'].get(u,{}).get('isClanVehicle') else 'premium' if economy[u].get('costGold',0)>0 else 'research')} for u in assets if u in index['records']}
  tree['assets']=assets
  # Derive the research/special boundary from explicit shop prerequisite overrides.
  special=[]
@@ -50,6 +50,9 @@ def enrich(tree,index,economy,root,repo,presentation=None):
   if a['id']==b['id']:internal.append(edge);continue
   rendered.append({**edge,'source':a['id'],'target':b['id'],'c1':a['column'],'c2':b['column'],'x1':a['left']+60,'x2':b['left']+60,'y1':a['top']+52,'y2':b['top']-4})
  tree['layout']={'width':width,'research_columns':split,'divider':divider,'height':y+10,'ranks':ranks,'nodes':nodes,'arrows':rendered,'internal_edges':internal}
+ if tree['branch']=='helicopters':
+  from helicopter_layout import layout
+  tree['layout']=layout(tree,index,economy)
  from tree_specs import BRANCH_CLASSES
  old_scope={u for u in vehicles if u in index['records'] and index['records'][u]['country']==tree['country'] and index['records'][u]['class'] in BRANCH_CLASSES[tree['branch']]}
  shown={u for n in nodes for u in n['units']}

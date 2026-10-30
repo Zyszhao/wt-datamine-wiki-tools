@@ -1,0 +1,25 @@
+const assert=require('node:assert/strict'),path=require('node:path'),fs=require('node:fs');
+const {pathToFileURL}=require('node:url');
+const {chromium}=require(path.join(process.env.WTW_NODE_MODULES,'playwright'));
+const root=path.resolve(__dirname,'..');
+(async()=>{const browser=await chromium.launch({headless:true,executablePath:process.env.WTW_BROWSER_PATH});const results=[];try{
+for(const width of [1440,390])for(const [tree,id] of [['israel_army','il_leopard_2a6_hel'],['ussr_aviation','mig_35']]){
+const page=await browser.newPage({viewport:{width,height:1000}}),errors=[];page.on('pageerror',e=>errors.push(String(e)));
+await page.goto(pathToFileURL(path.join(root,'work/preview',tree+'.html')).href,{waitUntil:'domcontentloaded'});
+const link=page.locator('[data-unit="'+id+'"] .wtt-hit a');assert.equal(await link.count(),1);assert((await link.getAttribute('href')).includes('/preview/index.html'));
+await link.evaluate(a=>a.click());await page.waitForURL('**/preview/index.html');assert.equal(await page.locator('.wtv[data-vehicle="'+id+'"]').count(),1);
+await page.locator('#wtv-modifications').scrollIntoViewIfNeeded();await page.waitForTimeout(150);
+assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+assert.equal(await page.evaluate(()=>document.querySelector('.wtv-mod-lines').getContext('2d').lineWidth),2.5);
+assert.equal(await page.locator('.wtv-article-shell').count(),1);
+assert.equal(await page.locator('.wtv-player-content [data-player-content="preview-fixture"]').count(),1);
+const composition=await page.evaluate(()=>{const root=document.querySelector('.wtv'),basic=root.querySelector('.wtv-basic-info'),manual=root.querySelector('.wtv-player-content');return {rootRight:root.getBoundingClientRect().right,basicTop:basic.offsetTop,manualTop:manual.offsetTop,modificationsTop:root.querySelector('#wtv-modifications').offsetTop,hasBasicFixture:basic.innerText.includes('载具描述子页拼合测试'),hasPlayerFixture:manual.innerText.includes('玩家内容区拼合测试'),targets:[...root.querySelectorAll('.wtv-content-edit a')].map(a=>a.getAttribute('href')),chars:root.querySelectorAll('.game-unit_chars-line').length,ammoRows:root.querySelectorAll('.game-unit_belt-list tbody tr').length}});
+assert(composition.rootRight<=width+1);assert(composition.manualTop>composition.modificationsTop);assert(composition.hasBasicFixture&&composition.hasPlayerFixture);assert.equal(composition.targets.length,2);assert(composition.targets[0].endsWith('/basic-info')&&composition.targets[1].endsWith('/player-content'));assert(composition.chars>0&&composition.ammoRows>0);
+assert.equal(await page.locator('.wtv-bwiki-hero').count(),1);
+assert.equal(await page.locator('.wtv-side [data-wtv-mode]').count(),2);assert.equal(await page.locator('.wtv [data-wtv-mode="sb"]').count(),0);assert.equal(await page.locator('.wtv-side .wtv-mode-switch').evaluate(x=>x===x.parentElement.lastElementChild),true);
+if(width>820){const side=page.locator('.wtv-side');assert.equal(await side.evaluate(x=>getComputedStyle(x).position),'sticky');await page.evaluate(()=>window.scrollTo(0,900));await page.waitForTimeout(80);const first=(await side.boundingBox()).y;await page.evaluate(()=>window.scrollTo(0,1200));await page.waitForTimeout(80);assert(Math.abs((await side.boundingBox()).y-first)<2);await page.evaluate(()=>{const h=document.createElement('div');h.className='wiki-nav';h.style.cssText='position:fixed;top:0;left:0;width:100%;height:64px';document.body.appendChild(h);window.dispatchEvent(new Event('scroll'));});await page.waitForTimeout(80);assert((await side.boundingBox()).y>=76);await page.evaluate(()=>{document.querySelector('.wiki-nav').remove();window.dispatchEvent(new Event('scroll'));});}
+if(id==='mig_35')assert((await page.locator('.game-unit_slot-list tbody tr').count())>0);
+if(id==='il_leopard_2a6_hel'){const text=await page.locator('.wtv').innerText();assert(text.includes('63,000')&&text.includes('1,500')&&text.includes('1,120,000'));assert(text.includes('3.93 TNT')&&text.includes('待发弹药架')&&text.includes('护身符费用')&&text.includes('收益系数'));assert.equal(await page.locator('.wtv-mod-toggle').count(),0);assert.equal(await page.locator('.wtv-armaments .game-unit_weapon .game-unit_belt-list').count(),3);for(const [mode,speed] of [['ab','76'],['rb','68']]){await page.locator('[data-wtv-mode="'+mode+'"]').click();assert((await page.locator('#wtv-sec-mobility').innerText()).includes(speed));}assert.equal(await page.locator('.wtv-mod-node').count(),18);await page.screenshot({path:path.join(root,'work/reports','leopard-article-'+width+'.png'),fullPage:true});}
+assert.deepEqual(errors,[]);results.push({tree,id,width,navigation:'passed',sharedComponent:'passed',generatedManualComposition:'passed',composition});await page.close();
+}fs.writeFileSync(path.join(root,'work/reports/vehicle-integration-qa.json'),JSON.stringify(results,null,2));console.log(JSON.stringify(results));
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exit(1);});

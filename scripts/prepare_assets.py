@@ -81,7 +81,7 @@ def main():
  shop=json.loads((REPO/'char.vromfs.bin_u/config/shop.blkx').read_text(encoding='utf-8'))
  for country,branches in shop.items():
   for branch,body in branches.items():
-   if tree_id(country,branch) not in DEPLOY_TREES:continue
+   if tree_id(country,branch) not in DEPLOY_TREES and branch!='helicopters':continue
    for col in body['range']:
     for code,value in col.items():
      if not isinstance(value,dict):continue

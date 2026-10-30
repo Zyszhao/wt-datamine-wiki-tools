@@ -3,6 +3,7 @@
 /*
 !/.gitignore
 !/.gitattributes
+!/.editorconfig
 !/README.md
 !/AGENTS.md
 !/scripts/
@@ -21,3 +22,8 @@ node_modules/
 /docs/*
 !/docs/PROJECT-GOALS.md
 !/docs/PUBLIC-REPOSITORY.md
+
+# Current maintenance contracts and freeze record (no generated/site content).
+!/docs/TEST-PAGE-CLEANUP.md
+!/docs/FREEZE-2026-10-30.md
+!/docs/CODE-AND-FORMATS.md

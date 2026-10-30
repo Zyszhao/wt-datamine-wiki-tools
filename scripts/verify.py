@@ -42,6 +42,13 @@ def main():
  assert idx['records']['us_m1a2_abrams']['category']=='中型坦克'
  assert idx['records']['us_m1a2_abrams']['game_type']=='typeMediumTank'
  assert len(idx['records'])==3420 and len(mods['records'])==manifest['global_modifications']
+ article_ids=[v['id'] for v in json.loads((ROOT/'config/vehicle-examples.json').read_text(encoding='utf-8'))['vehicles']]
+ article_file_map={p['title']:p['file'] for p in manifest['pages'] if p['title'] in article_ids}
+ for code in article_ids:
+  title=code
+  assert pages[title]=='__NOTOC__\n{{WTJ/vehicle-page|id='+code+'}}\n'
+  assert Path(next(p['file'] for p in manifest['pages'] if p['title']==title)).name=='article_vehicle_'+code+'.wiki'
+ assert len({article_file_map[code] for code in article_ids})==len(article_ids)
  assert len(idx['groups'])==402
  assert idx['groups']['us_sherman_group']['name']=='M4'
  for group in idx['groups'].values():assert group['name'] and all(u in idx['records'] for u in group['members'])
@@ -95,7 +102,17 @@ def main():
  for pe in ET.parse(WIKI/'import-testing.xml').findall('m:page',ns):assert pe.find('m:revision/m:text',ns).text==pages[pe.find('m:title',ns).text]
  assert (WIKI/'WTJTreeTesting-all-testing.xml').read_bytes()==(WIKI/'import-testing.xml').read_bytes()
  imported=ET.parse(WIKI/'WTJTreeTesting-all-testing.xml').findall('m:page',ns)
- assert len(imported)==len(pages)==14
+ assert len(imported)==len(pages)
+ assert not any(title.casefold().endswith(('/user-content','/basic-info','/player-content')) for title in pages)
+ assert all(p['owner']=='generated' for p in manifest['pages'])
+ vehicle_template=pages['模板:WTJ/vehicle-page']
+ assert 'wtv-article-shell' in vehicle_template and '#invoke:WTJ/vehicle|page|' in vehicle_template
+ content_module=pages['模块:WTJ/vehicle-content']
+ assert '#ifexist:' in content_module and "'basic-info'" in content_module and "'player-content'" in content_module
+ for xml_name in ('import-testing.xml','import-update.xml','import-tree-only.xml'):
+  xml_titles=[pe.findtext('m:title',namespaces=ns) for pe in ET.parse(WIKI/xml_name).findall('m:page',ns)]
+  assert not any(title and title.casefold().endswith(('/user-content','/basic-info','/player-content')) for title in xml_titles),xml_name
+ assert {'模块:WTJ/modifications','模板:WTJ/modifications',*article_ids} <= set(pages)
  for pe in imported:
   title=pe.find('m:title',ns).text;revision=pe.find('m:revision',ns)
   assert revision.find('m:timestamp',ns).text.endswith('Z')

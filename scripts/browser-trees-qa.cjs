@@ -31,7 +31,7 @@ const root=path.resolve(__dirname,'..');
    await p.screenshot({path:path.join(root,'work/reports',key+'-'+viewport+'.png')});
    const search=p.getByLabel('搜索载具',{exact:true}),first=await p.locator('.wtt-card').first().getAttribute('data-unit');await search.fill(first);
    if(!(await p.locator('.wtt-card:not(.wtt-filtered-card)').count()))throw Error('search');await search.fill('');
-   await p.locator('.wtt-br-filter summary').click();if(await p.locator('input[type=range]').count()!==6)throw Error('ranges');
+   await p.locator('.wtt-br-filter summary').click();if(await p.locator('input[type=range]').count()!==(key==='china_aviation'?8:6))throw Error('ranges');
    const slider=p.getByLabel('历史权重下限',{exact:true});await slider.fill('2');await slider.dispatchEvent('input');
    const threshold=+(await slider.getAttribute('aria-valuetext'));
    if(await p.locator('.wtt-card:not(.wtt-filtered-card)').evaluateAll((a,t)=>a.some(e=>+e.querySelector('.wtt-br-rb').textContent<t),threshold))throw Error('br range');

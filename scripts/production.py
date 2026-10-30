@@ -1,24 +1,51 @@
-"""Build production tree import packages from local datamine and read-only site evidence.
+"""Build production tree import directories from local datamine and read-only evidence.
 
 Never edits the Wiki. Keep snapshots and all generated materials outside Git.
+Formal scope is every shop country/branch (44 trees, helicopters included). Existing
+tree pages keep their surrounding source and only the Tree-Start..Tree-End region is
+replaced. Missing export evidence never proves that a wiki page is absent.
 """
 import csv,hashlib,html,json,re,shutil,sys,time
-from zipfile import ZipFile,ZIP_DEFLATED
 from datetime import datetime,timezone
 from pathlib import Path
 from urllib.parse import urlencode
 from urllib.request import Request,urlopen
 from xml.etree import ElementTree as ET
-from paths import ROOT,REPO,WORK,WIKI,VENDOR
+from paths import ROOT,REPO,WORK,WIKI,VENDOR,IMPORT_PACK,reset_import_pack
 from tree_specs import COUNTRIES,BRANCHES,tree_id
 from prepare_assets import extract_contract
 from tree_layout import enrich
+from tree_policy import exclusion_reason
+from research_edges import research_edges
 
 BASE='https://wiki.biligame.com/warthunder/'
 OUT=WIKI/'production';EVIDENCE=ROOT/'evidence/production'
 PREFIX='WTJ';NS='http://www.mediawiki.org/xml/export-0.11/'
+HELI_MARK='自动生成 · 数据快照'
+HELI_COMMENT='<!-- WTJ:auto-generated tree region; 撤销见 manifest.json fallbacks -->'
+EXPECTED_TREES=44
+EXPECTED_HELICOPTERS={'usa_helicopters':19,'germany_helicopters':12,'ussr_helicopters':15,'britain_helicopters':10,'japan_helicopters':8,'china_helicopters':13,'italy_helicopters':9,'france_helicopters':12,'sweden_helicopters':6,'israel_helicopters':8}
+SLICE_PAGES=15;SLICE_BYTES=1500000
+TREE_REGION=re.compile(r'\{\{Tree-Start\b.*?\{\{Tree-End\s*\}\}',re.S|re.I)
 LAST_REQUEST=0
 def dump(x):return json.dumps(x,ensure_ascii=False,indent=2)+'\n'
+def type_icon_assets(out):
+    root=WORK/'research/type-symbols';catalog=root/'catalogue.json'
+    if not catalog.exists():return {},''
+    data=json.loads(catalog.read_text(encoding='utf-8'));seen={}
+    for item in data['mappings']:
+        role=re.sub(r'[^a-z0-9]+','_',item['role'].lower()).strip('_')
+        key=item['branch']+'_'+role;filename='WT_type_'+key+'.svg'
+        if key in seen:continue
+        source=root/item['href'].split('/')[-1].split('#')[0]
+        if not source.exists():continue
+        text=source.read_text(encoding='utf-8')
+        text=re.sub(r'fill="currentColor"','fill="'+item['color']+'"',text,flags=re.I)
+        (out/'uploads'/filename).write_text(text,encoding='utf-8');seen[key]=filename
+    lines=['<includeonly>{{#switch:{{{1|}}}']
+    lines += ['|'+key+'=[[File:'+filename+'|10px|link=]]' for key,filename in sorted(seen.items())]
+    lines.append('|#default=}}</includeonly>')
+    return seen,'\n'.join(lines)+'\n'
 def api(**params):
  global LAST_REQUEST
  url=BASE+'api.php?'+urlencode({'format':'json',**params})
@@ -29,13 +56,13 @@ def api(**params):
   except Exception:
    if attempt==2:raise
    time.sleep(1+attempt)
-def query_titles(titles):
+def query_titles(titles,refresh=False):
  result={}
  unique=list(dict.fromkeys(titles))
  for start in range(0,len(unique),40):
   batch=unique[start:start+40]
   cache=EVIDENCE/('query-'+hashlib.sha256('\n'.join(batch).encode()).hexdigest()[:20]+'.json')
-  if cache.exists():data=json.loads(cache.read_text(encoding='utf-8'))
+  if cache.exists() and not refresh and '--refresh-uploads' not in sys.argv:data=json.loads(cache.read_text(encoding='utf-8'))
   else:
    data=api(action='query',titles='|'.join(batch),prop='info|imageinfo',iiprop='url');cache.write_text(dump(data),encoding='utf-8')
   normalized={x['from']:x['to'] for x in data.get('query',{}).get('normalized',[])}
@@ -49,15 +76,24 @@ def fetch(title):
 def snapshot():
  EVIDENCE.mkdir(parents=True,exist_ok=True)
  shop=json.loads((REPO/'char.vromfs.bin_u/config/shop.blkx').read_text(encoding='utf-8'))
- targets={tree_id(country,branch):COUNTRIES[country.removeprefix('country_')]+('陆军' if branch=='army' else BRANCHES[branch]) for country,branches in shop.items() for branch in branches if branch!='helicopters'}
- info=query_titles(list(targets.values())+['MediaWiki:Common.js','模板:ResourceLoader'])
+ targets={}
+ for country in shop:
+  for branch in shop[country]:
+   targets[tree_id(country,branch)]=COUNTRIES[country.removeprefix('country_')]+('陆军' if branch=='army' else BRANCHES[branch])
+ helis=helicopter_keys(targets)
+ # A new helicopter page may legitimately be absent; an existing page must not be.
+ info=query_titles([t for k,t in targets.items() if k not in helis]+['MediaWiki:Common.js','模板:ResourceLoader'])
  for key,title in targets.items():
-  if 'missing' in info[title]:raise ValueError('Expected existing tree page missing: '+title)
+  if key not in helis and 'missing' in info[title]:raise ValueError('Expected existing tree page missing: '+title)
  def task(pair):
   key,title=pair
   path=EVIDENCE/(key+'.json')
   if not path.exists():
-   data=fetch(title);path.write_text(dump(data),encoding='utf-8')
+   try:data=fetch(title)
+   except ValueError:
+    if key not in helis:raise
+    print('snapshot-missing',key,title,flush=True);return key
+   path.write_text(dump(data),encoding='utf-8')
   return key
  for pair in targets.items():print('snapshot',task(pair),flush=True)
  for title,name in [('MediaWiki:Common.js','common-js'),('模板:ResourceLoader','resource-loader')]:
@@ -83,21 +119,28 @@ def xml_file(pages,path):
 
 def import_exports(paths):
  """Read current-revision exports while retaining separately captured rendered evidence."""
- EVIDENCE.mkdir(parents=True,exist_ok=True); exported={}
+ EVIDENCE.mkdir(parents=True,exist_ok=True)
+ saved=EVIDENCE/'exported-sources.json'
+ exported=json.loads(saved.read_text(encoding='utf-8')) if saved.exists() else {}
  for path in paths:
   root=ET.parse(path).getroot();ns={'m':root.tag.split('}')[0].strip('{')}
   for node in root.findall('m:page',ns):
    title=node.findtext('m:title',namespaces=ns);rev=node.find('m:revision',ns)
    exported[title]={'content':rev.findtext('m:text',default='',namespaces=ns),'revid':rev.findtext('m:id',namespaces=ns)}
  shop=json.loads((REPO/'char.vromfs.bin_u/config/shop.blkx').read_text(encoding='utf-8'))
- targets={tree_id(c,b):COUNTRIES[c.removeprefix('country_')]+('陆军' if b=='army' else BRANCHES[b]) for c,bs in shop.items() for b in bs if b!='helicopters'}
+ targets={tree_id(c,b):COUNTRIES[c.removeprefix('country_')]+('陆军' if b=='army' else BRANCHES[b]) for c,bs in shop.items() for b in bs}
  for key,title in targets.items():
-  source=exported[title];path=EVIDENCE/(key+'.json')
+  source=exported.get(title)
+  # Helicopter pages may not exist yet; their absence is reported, never invented.
+  if source is None:
+   print('export-missing',key,title,flush=True);continue
+  path=EVIDENCE/(key+'.json')
   old=json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
   # Historical parsed HTML is evidence, not a replacement for the newly exported source.
-  old.update(title=title,wikitext={'*':source['content']},revid=source['revid'])
+  old.update(title=title,wikitext={'*':source['content']},revid=source['revid'],generated_source=False)
   path.write_text(dump(old),encoding='utf-8')
  for title,key in [('MediaWiki:Common.js','common-js'),('模板:ResourceLoader','resource-loader')]:
+  if title not in exported:continue
   data={'query':{'pages':{'export':{'title':title,'revisions':[{'slots':{'main':{'*':exported[title]['content']}}}]}}}}
   (EVIDENCE/(key+'.json')).write_text(dump(data),encoding='utf-8')
  (EVIDENCE/'targets.json').write_text(dump(targets),encoding='utf-8')
@@ -121,6 +164,7 @@ def source_mapping(index,snapshots):
  # manual values rather than guessing their expansion. Match members inside groups too.
  icons=dict(re.findall(r'\|([^|=\n]+)=\[\[(?:文件|File):([^|\]]+)\|',sources['模板:UnitTypeIcon']['content']))
  for key,data in snapshots.items():
+  if not (data.get('wikitext') or {}).get('*'):continue
   for call in re.findall(r'\{\{Tree-Unit\|([^{}]*)\}\}',data['wikitext']['*'],re.I):
    args=[x.strip() for x in call.split('|')];code=lower.get(args[0].lower())
    if not code:continue
@@ -134,20 +178,61 @@ def source_mapping(index,snapshots):
     row.update(page=named['manuallink'].strip(),link_source='exported Tree-Unit manuallink')
  return mapping,groups
 
+def fallback_map(records):
+ """Game-code and Chinese-name fallbacks for cards whose article is unconfirmed.
+
+ Only titles confirmed by saved read-only query evidence are marked verified; the
+ generator never upgrades an unknown destination into an assumed existing page.
+ """
+ path=EVIDENCE/'resolved-articles.json'
+ candidates={}
+ for code in records:
+  name=records[code].get('name')
+  if name and name!=code:candidates[code]={'title':name,'kind':'game Chinese name'}
+  candidates.setdefault(code,{'title':code,'kind':'game code'})
+ resolved=json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+ pending=[t for t in {c['title'] for c in candidates.values()} if t not in resolved]
+ # Unknown titles remain unverified; do not query the entire global index.
+ result={}
+ for code,c in candidates.items():
+  page=resolved.get(c['title'],{})
+  result[code]={'target':c['title'],'kind':c['kind'],'verified':'missing' not in page and page.get('ns')==0}
+ return result
+
+def shop_targets():
+ """Every shop country/branch is a formal target; helicopters are no exception."""
+ shop=json.loads((REPO/'char.vromfs.bin_u/config/shop.blkx').read_text(encoding='utf-8'))
+ result={}
+ for country in shop:
+  for branch in shop[country]:
+   result[tree_id(country,branch)]=COUNTRIES[country.removeprefix('country_')]+('陆军' if branch=='army' else BRANCHES[branch])
+ return result
+def helicopter_keys(targets):
+ return {key for key in targets if key.endswith('_helicopters')}
+def page_region(key):
+ """Managed region for a page whose whole tree body is replaced, with an explicit mark."""
+ return '{{WTJ/styles}}\n'+HELI_COMMENT+'\n<div class="wtt-auto-mark" style="font:13px/1.6 system-ui;color:#5b4a25;background:#fff8e5;border-left:4px solid #c69c36;padding:6px 10px;margin:4px 0">'+HELI_MARK+'：本科技树由游戏商店数据自动生成，非手工维护；撤销或回退见部署包 manifest.json 的 fallbacks。</div>\n{{#invoke:WTJ/catalogue|tree|tree='+key+'_tree|links=existing}}'
+
 def main():
  if '--export-xml' in sys.argv:
   import_exports([Path(p) for p in sys.argv[sys.argv.index('--export-xml')+1:] if not p.startswith('--')])
  if '--snapshot-file' in sys.argv:
   source=Path(sys.argv[sys.argv.index('--snapshot-file')+1]);captured=json.loads(source.read_text(encoding='utf-8'))
   EVIDENCE.mkdir(parents=True,exist_ok=True)
-  assert len(captured['pages'])==34
+  expected=shop_targets()
+  assert set(captured['targets'])==set(expected),(sorted(set(expected)-set(captured['targets'])),sorted(set(captured['targets'])-set(expected)))
+  assert len(captured['pages'])==len(expected)
   for key,data in captured['pages'].items():(EVIDENCE/(key+'.json')).write_text(dump(data),encoding='utf-8')
   for key,data in captured['support'].items():(EVIDENCE/(key+'.json')).write_text(dump(data),encoding='utf-8')
   (EVIDENCE/'targets.json').write_text(dump(captured['targets']),encoding='utf-8')
  if '--fetch' in sys.argv:snapshot()
  if '--refresh-rendered' in sys.argv:
   targets=json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8'))
+  helis=helicopter_keys(targets)
   for key,title in targets.items():
+   # New helicopter pages have no prior rendered tree to compare, and a partial
+   # refresh must never replace the saved evidence of an existing page.
+   if key in helis:print('rendered-skip-new-page',key,flush=True);continue
    path=EVIDENCE/(key+'.json');data=json.loads(path.read_text(encoding='utf-8'))
    cache=EVIDENCE/(key+'-live.html')
    if not cache.exists():
@@ -165,11 +250,20 @@ def main():
   if path.is_file():path.unlink()
  for path in OUT.glob('WTJ-part-*.xml'):path.unlink()
  targets=json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8'))
+ # Every shop branch is formal; exported source is required for every target.
+ for key,title in shop_targets().items():targets.setdefault(key,title)
+ helis=helicopter_keys(targets)
  index=json.loads((WIKI/'pages/vehicles_index_testing.json').read_text(encoding='utf-8'))
  economy=json.loads((REPO/'char.vromfs.bin_u/config/wpcost.blkx').read_text(encoding='utf-8'))
  lower={u.lower():u for u in index['records']};mapping={};groups={};files={};snapshots={}
  for key,title in targets.items():
-  data=json.loads((EVIDENCE/(key+'.json')).read_text(encoding='utf-8'));snapshots[key]=data
+  evidence=EVIDENCE/(key+'.json')
+  if evidence.exists(): data=json.loads(evidence.read_text(encoding='utf-8'))
+  elif key in helis:
+   raise FileNotFoundError('Export required for tree page: '+title)
+  else: raise FileNotFoundError(evidence)
+  snapshots[key]=data
+  if data.get('generated_source'):raise ValueError('Actual page export required: '+title)
   if data.get('text'):
    v,g,f=extract_contract(data)
    for row in v.values():row['link_source']='saved rendered tree target'
@@ -183,6 +277,16 @@ def main():
   else:
    for k,v in row.items():target.setdefault(k,v)
  for code,row in source_groups.items():groups.setdefault(code,row)
+ icon_files,icon_template=type_icon_assets(OUT)
+ icon_catalog=WORK/'research/type-symbols/catalogue.json'
+ if icon_catalog.exists():
+  icon_data=json.loads(icon_catalog.read_text(encoding='utf-8'))
+  for branch in icon_data['branches']:
+   for item in branch['rows']:
+    unit=(item.get('unit') or '').rsplit('/',1)[-1]
+    if unit in index['records']:
+     role=re.sub(r'[^a-z0-9]+','_',item['role'].lower()).strip('_')
+     mapping.setdefault(unit,{})['type_key']=branch['branch']+'_'+role
  for g in groups.values():g['members']=[lower.get(u,u) for u in g.get('members',[])]
  # Confirm destinations, rather than treating red links in the old tree as existing articles.
  trees={key:json.loads((WORK/('exports/trees/'+key+'_tree_testing.json')).read_text(encoding='utf-8')) for key in targets}
@@ -206,11 +310,17 @@ def main():
   # replacing a disambiguated title with a display name can point at another unit.
   item['page']=destination or item.get('page') or r['name']
   item['link_verified']=bool(destination)
+ # Fallback titles are only marked verified when the saved query proves the page.
+ for code,row in fallback_map(index['records']).items():
+  item=mapping.setdefault(code,{})
+  item.setdefault('fallback_page',row['target']);item.setdefault('fallback_page_verified',row['verified']);item.setdefault('fallback_source',row['kind'])
  # Query missing image titles in batches, reusing existing site files wherever available.
  groupcodes={n['folder'] for tree in trees.values() for c in tree['columns'] for n in c['nodes'] if n['folder']}
  image_titles=['文件:'+mapping.get(u,groups.get(u,{})).get('file',u+'.png') for u in codes|groupcodes if mapping.get(u,groups.get(u,{})).get('file',u+'.png').casefold() not in files]
  image_cache=EVIDENCE/'resolved-images.json'
- images=json.loads(image_cache.read_text(encoding='utf-8')) if image_cache.exists() else query_titles(image_titles)
+ images=json.loads(image_cache.read_text(encoding='utf-8')) if image_cache.exists() else {}
+ image_titles += ['文件:'+name for name in icon_files.values()]
+ images.update(query_titles(image_titles,refresh=True))
  image_cache.write_text(dump(images),encoding='utf-8')
  for title,data in images.items():
   if 'missing' not in data and data.get('imageinfo'):
@@ -220,7 +330,7 @@ def main():
   if source.exists():shutil.copyfile(source,WORK/'assets'/(code+'.png'))
  presentation={'vehicles':mapping,'groups':groups,'files':files}
  (EVIDENCE/'presentation-map.json').write_text(dump(presentation),encoding='utf-8')
- pages=[];rollback=[];reports={};uploads={}
+ pages=[];rollback=[];reports={};uploads={};regions={};fallbacks={};route_failures=[]
  def page(title,model,content,filename):
   if model=='json' and max(len(content.encode()),len(json.dumps(json.loads(content),ensure_ascii=False,indent=4).encode()))>=2097152:raise ValueError('JSON exceeds limit: '+title)
   (OUT/'pages'/filename).write_text(content,encoding='utf-8');pages.append({'title':title,'model':model,'content':content,'file':filename,'bytes':len(content.encode())})
@@ -228,7 +338,22 @@ def main():
   if code in groups and groups[code].get('name') and groups[code]['name']!=code:g['name']=groups[code]['name']
  page(PREFIX+'/data/vehicles_index.json','json',json.dumps(index,ensure_ascii=False,separators=(',',':'))+'\n','vehicles_index.json')
  for key,tree in trees.items():
+  created=bool(snapshots[key].get('generated_source'))
   tree=enrich(tree,index,economy,ROOT,REPO,presentation)
+  # research_edges is the single router for every formal tree, helicopters too.
+  # The helicopter layout keeps its rankPosXY card geometry; arrows are re-derived
+  # from the real shop relations so fork/oblique edges never regress to straight lines.
+  try:
+   arrows,internal=research_edges(tree['layout']['nodes'],tree['edges'],channel_offset=60 if key in helis else 54,target_gap=8 if key in helis else 4)
+   tree['layout']['arrows']=arrows;tree['layout']['internal_edges']=internal
+   tree['layout']['routing']='research_edges'
+  except ValueError as error:
+   # Never drop a relation: real edges stay and the module's straight fallback draws them.
+   positions={u:n for n in tree['layout']['nodes'] for u in n['units']}
+   tree['layout']['arrows']=[{**edge,'source':positions[edge['from']]['id'],'target':positions[edge['to']]['id'],'c1':positions[edge['from']]['column'],'c2':positions[edge['to']]['column'],'x1':positions[edge['from']]['left']+60,'x2':positions[edge['to']]['left']+60,'y1':positions[edge['from']]['top']+52,'y2':positions[edge['to']]['top']-4} for edge in tree['edges'] if positions[edge['from']] is not positions[edge['to']]]
+   tree['layout']['internal_edges']=[edge for edge in tree['edges'] if positions[edge['from']] is positions[edge['to']]]
+   tree['layout']['routing']='straight fallback (relations retained)'
+   route_failures.append({'tree':key,'error':str(error),'relations':len(tree['edges']),'drawn':len(tree['layout']['arrows'])+len(tree['layout']['internal_edges'])})
   visible={u for c in tree['columns'] for n in c['nodes'] for u in n['units']}
   used=visible|{n['folder'] for c in tree['columns'] for n in c['nodes'] if n['folder']}
   tree['assets']={u:v for u,v in tree['assets'].items() if u in used}
@@ -248,18 +373,31 @@ def main():
      first=next((u for u in node['units'] if tree['assets'][u].get('remote') or tree['assets'][u].get('local')),None)
      if first:tree['assets'][folder]={**tree['assets'][first],'fallback_member':first}
   page(PREFIX+'/data/'+key+'_tree.json','json',json.dumps(tree,ensure_ascii=False,separators=(',',':'))+'\n',key+'_tree.json')
-  old=snapshots[key]['wikitext']['*'];match=re.search(r'\{\{Tree-Start\b.*?\{\{Tree-End\s*\}\}',old,re.S|re.I)
-  if not match:raise ValueError('Cannot safely identify existing tree region: '+targets[key])
-  replacement='{{WTJ/styles}}\n{{#invoke:WTJ/catalogue|tree|tree='+key+'_tree|links=existing}}'
-  content=old[:match.start()]+replacement+old[match.end():]
-  page(targets[key],'wikitext',content,key+'.wiki');rollback.append({'title':targets[key],'model':'wikitext','content':old})
-  reports[key]={'title':targets[key],'visible':tree['visible_count'],'old_revision':snapshots[key].get('revid'),'verified_links':sum(mapping[u]['link_verified'] for u in visible),'groups':sum(bool(n['folder']) for c in tree['columns'] for n in c['nodes'])}
+  old=snapshots[key]['wikitext']['*'];match=TREE_REGION.search(old)
+  if created:
+   # The page does not exist yet, so there is no surrounding navigation to keep;
+   # the created page states its origin itself.
+   region=page_region(key)
+   content='__NOINDEX__\n'+region+'\n'
+   rollback.append({'title':targets[key],'model':'wikitext','content':'','delete':True})
+   fallbacks[key]={'title':targets[key],'reason':'游戏 shop 存在该直升机分支，但站点当前没有对应页面。','handling':'新建页面：回退 XML 不含本页；如需撤销，删除本页或改为指向同国空军页面的跳转。','mark':HELI_MARK}
+  elif not match:raise ValueError('Cannot safely identify existing tree region: '+targets[key])
+  else:
+   region='{{WTJ/styles}}\n{{#invoke:WTJ/catalogue|tree|tree='+key+'_tree|links=existing}}'
+   content=old[:match.start()]+region+old[match.end():]
+   rollback.append({'title':targets[key],'model':'wikitext','content':old})
+  regions[key]=region
+  page(targets[key],'wikitext',content,key+'.wiki')
+  reports[key]={'title':targets[key],'created':created,'visible':tree['visible_count'],'old_revision':snapshots[key].get('revid'),'verified_links':sum(mapping[u]['link_verified'] for u in visible),'groups':sum(bool(n['folder']) for c in tree['columns'] for n in c['nodes']),'routing':tree['layout']['routing'],'arrows':len(tree['layout']['arrows']),'mark':HELI_MARK if created else None}
  lua=(ROOT/'src/catalogue.lua').read_text(encoding='utf-8').replace("local prefix='WTJTreeTesting'","local prefix='WTJ'").replace("..'_testing.json'","..'.json'")
  lua=lua.replace("local existing=args.links=='existing'","local existing=args.links~='testing'")
  lua=lua.replace("prefix..'/vehicle/'..code..'_testing'","r.name")
+ # Unconfirmed article links use the locally verified Chinese-name/code fallback.
+ lua=lua.replace("local dest=existing and pr.existing_page or prefix","local dest=existing and (pr.existing_page or pr.fallback_page) or prefix")
  lua=lua.replace('WTJTreeTesting_folder_prem.png','Item_group_prem.png').replace('WTJTreeTesting_folder.png','Item_group.png')
  lua=lua.replace('现有 BWiki 页面（缺映射时回退测试页）','现有 BWiki 页面（缺映射时回退中文名称）').replace('独立测试页面','中文名称页面')
- lua=lua.replace("exp_torpedo_boat='PT_icon.png'", "exp_destroyer='DD_icon.png',exp_cruiser='CL_icon.png',exp_gun_boat='PC_icon.png',exp_torpedo_boat='PT_icon.png'")
+ # Helicopter cards use one existing class icon; no new icon template is assumed here.
+ lua=lua.replace("exp_torpedo_boat='PT_icon.png'","exp_torpedo_boat='PT_icon.png',exp_helicopter='UH_icon.png'")
  # Production package contains trees only, without the unrelated M1A2 demo APIs.
  lua=lua.split('\nfunction p.modifications()',1)[0]+'\nreturn p\n'
  lua=re.sub(r'<span class="wtt-search-hint">.*?</span>','',lua)
@@ -270,6 +408,16 @@ def main():
  page('MediaWiki:WTJ.js','javascript',js,'tree.js')
  css=(ROOT/'src/tree.css').read_text(encoding='utf-8').replace('}}','} }')
  page('模板:WTJ/styles','wikitext','<includeonly>{{ResourceLoader|WTJ}}\n{{#css:\n'+css+'\n}}</includeonly>','styles.wiki')
+ # Fail before packaging if the site CSS extension rejects even one declaration.
+ from verify_wiki_css import verify as verify_site_css
+ verify_site_css((ROOT/'src/tree.css').read_text(encoding='utf-8'),OUT)
+ if icon_template:
+  page('模板:WTJ/type-icon','wikitext',icon_template,'type-icon.wiki')
+  uploads.update({p.name:'type-icon' for p in (OUT/'uploads').glob('WT_type_*.svg')})
+  for filename in icon_files.values():
+   if filename.casefold() in files:
+    uploads.pop(filename,None)
+    (OUT/'uploads'/filename).unlink(missing_ok=True)
  # Existing site files, confirmed by read-only imageinfo. A renamed File without
  # redirect must be referenced at its new title; no replacement upload is needed.
  background_cache=EVIDENCE/'background-files-current.json'
@@ -290,23 +438,42 @@ def main():
   if p['model']=='Scribunto':
    p['bytes']=len(p['content'].encode('utf-8'))
   if 'WTJTreeTesting' in p['content'] or '_testing' in p['title']:raise ValueError('Testing dependency: '+p['title'])
+ # The upload directory must contain exactly referenced files confirmed missing
+ # on the wiki. Export omission alone is never proof that an image is absent.
+ referenced_images={a['file'] for tree in trees.values() for a in tree['assets'].values()}
+ referenced_images.update(icon_files.values())
+ for name in list(uploads):
+  if name not in referenced_images:
+   uploads.pop(name);(OUT/'uploads'/name).unlink(missing_ok=True)
+ for name in uploads:
+  evidence=images.get('文件:'+name)
+  assert evidence is not None and 'missing' in evidence,('Upload is not confirmed missing',name)
+ assert set(uploads)=={p.name for p in (OUT/'uploads').iterdir() if p.is_file()}
+ audit={'checked_at':datetime.now(timezone.utc).isoformat(),'uploads':sorted(uploads),
+        'upload_count':len(uploads),'reused_files':sorted(referenced_images-set(uploads)),
+        'unconfirmed':[],'export_sources':{key:snapshots[key].get('revid') for key in trees},
+        'delivery_directory':str(IMPORT_PACK),'format':'XML and images; no ZIP'}
+ (OUT/'upload-audit.json').write_text(dump(audit),encoding='utf-8')
+ with (OUT/'upload-list.csv').open('w',encoding='utf-8-sig',newline='') as stream:
+  writer=csv.writer(stream);writer.writerow(['filename','reason','delivery_path'])
+  for name in sorted(uploads):writer.writerow([name,'API imageinfo confirms missing',str(IMPORT_PACK/name)])
  xml_file(pages,OUT/'WTJ-all-trees-production.xml');xml_file(rollback,OUT/'WTJ-rollback-existing-trees.xml')
  # Bounded optional slices: complete all-in-one XML remains the requested main deliverable.
  slices=[];batch=[];size=0
- ordered=sorted(pages,key=lambda p:0 if p['model'] in ('json','Scribunto','javascript') or p['title'].startswith('模板:') else 1)
- for p in ordered:
-  if batch and (len(batch)>=15 or size+p['bytes']>1500000):slices.append(batch);batch=[];size=0
+ sorted_pages=sorted(pages,key=lambda p:0 if p['model'] in ('json','Scribunto','javascript') or p['title'].startswith('模板:') else 1)
+ for p in sorted_pages:
+  if batch and (len(batch)>=SLICE_PAGES or size+p['bytes']>SLICE_BYTES):slices.append(batch);batch=[];size=0
   batch.append(p);size+=p['bytes']
  if batch:slices.append(batch)
  for i,batch in enumerate(slices,1):xml_file(batch,OUT/f'WTJ-part-{i:02d}-of-{len(slices):02d}.xml')
  missing_images=[{'tree':key,'code':code} for key in trees for code,asset in json.loads((OUT/'pages'/(key+'_tree.json')).read_text(encoding='utf-8'))['assets'].items() if not asset.get('remote') and not asset.get('local')]
- manifest={'game_version':index['game_version'],'prefix':PREFIX,'trees':reports,'page_count':len(pages),'pages':[{k:v for k,v in p.items() if k!='content'} for p in pages],'uploads':uploads,'unverified_links':missing_links,'missing_images':missing_images,'slices':len(slices),'online_written':False,'common_js_replaced':False}
+ manifest={'game_version':index['game_version'],'prefix':PREFIX,'tree_count':len(reports),'helicopter_trees':sorted(helis),'created_pages':sorted(r['title'] for r in reports.values() if r['created']),'trees':reports,'page_count':len(pages),'pages':[{k:v for k,v in p.items() if k!='content'} for p in pages],'uploads':uploads,'unverified_links':missing_links,'missing_images':missing_images,'slices':len(slices),'slice_pages':SLICE_PAGES,'slice_bytes':SLICE_BYTES,'fallbacks':fallbacks,'route_failures':route_failures,'mark':HELI_MARK,'online_written':False,'common_js_replaced':False}
  with (OUT/'link-audit.csv').open('w',encoding='utf-8-sig',newline='') as stream:
-  writer=csv.writer(stream);writer.writerow(['game_code','game_zh_name','legacy_target','deployed_target','api_exists','mapping_source'])
+  writer=csv.writer(stream);writer.writerow(['game_code','game_zh_name','legacy_target','deployed_target','api_exists','mapping_source','fallback_target','fallback_verified'])
   for code in sorted(codes):
-   row=mapping[code];writer.writerow([code,index['records'][code]['name'],row.get('legacy_page'),row['page'],row['link_verified'],row.get('link_source','game Chinese name')])
+   row=mapping[code];writer.writerow([code,index['records'][code]['name'],row.get('legacy_page'),row['page'],row['link_verified'],row.get('link_source','game Chinese name'),row.get('fallback_page'),row.get('fallback_page_verified')])
  (OUT/'manifest.json').write_text(dump(manifest),encoding='utf-8')
- validate(pages,trees,index,OUT)
+ validate(pages,trees,index,OUT,regions,lua)
  common_data=json.loads((EVIDENCE/'common-js.json').read_text(encoding='utf-8'))
  common=next(iter(common_data['query']['pages'].values()))['revisions'][0]['slots']['main']['*']
  loader_data=json.loads((EVIDENCE/'resource-loader.json').read_text(encoding='utf-8'))
@@ -314,22 +481,26 @@ def main():
  assert '.resourceLoader' in common and 'mw.loader.load' in common and 'MediaWiki:' in common and 'resourceLoader' in loader
  (OUT/'common-js-compatibility.json').write_text(dump({'existing_loader_verified':True,'common_js_sha256':hashlib.sha256(common.encode()).hexdigest(),'replacement_common_js':False,'global_script':'MediaWiki:WTJ.js','trigger':'模板:WTJ/styles → 模板:ResourceLoader → existing MediaWiki:Common.js loader','personal_scripts_required':False}),encoding='utf-8')
  instructions(pages,manifest,slices)
- print(dump({'trees':len(trees),'pages':len(pages),'vehicles':len(codes),'missing_article_links':len(missing_links),'uploads':len(uploads),'xml':str(OUT/'WTJ-all-trees-production.xml')}))
+ print(dump({'trees':len(trees),'helicopters':len(helis),'created_pages':len(fallbacks),'route_failures':len(route_failures),'pages':len(pages),'vehicles':len(codes),'missing_article_links':len(missing_links),'uploads':len(uploads),'online_written':False,'xml':str(OUT/'WTJ-all-trees-production.xml')}))
 
 def instructions(pages,manifest,slices):
  lines=['# WTJ 正式科技树部署包','','游戏数据版本：'+manifest['game_version']+'。生成日期：'+datetime.now(timezone.utc).astimezone().isoformat()+'.','',
- '## 导入方式','','主文件：WTJ-all-trees-production.xml，包含 34 棵非直升机树、全局简化索引、本树数据库、模块、样式模板与全站脚本，共 72 页。',
+ '已导入吸顶工具栏和飞机陆战历史更新、且已修复整份 CSS 被拒绝的问题时，只导入 ImportPack/Repair/WTJ-tree-sticky-offset.xml，更新 MediaWiki:WTJ.js。本次动态读取站点可见固定导航栏的底边，让整条工具栏（含权重模式按钮）停在导航栏下方；支持滚动、窗口大小及导航栏高度变化，手机端隐藏导航栏时不留空隙。样式沿用 top:0，不使用 BWiki 拒绝的 CSS var()。导入后强制刷新脚本缓存；无需重新导入数据、Lua、样式或图片。尚未部署 WTJ 的站点请使用 Full 或 Slices。',
+ '## 导入方式','','主文件：WTJ-all-trees-production.xml，包含 '+str(manifest['tree_count'])+' 棵正式科技树（含 '+str(len(manifest['helicopter_trees']))+' 棵直升机，其中 '+str(len(manifest['created_pages']))+' 棵为新建页面）、全局简化索引、本树数据库、模块、样式模板与全站脚本，共 '+str(len(pages))+' 页。',
  '在 Special:Import 上传 XML，按原命名空间导入，不将所有页重映射到同一空间。没有导入权限或 MediaWiki 脚本权限时请由有权限者执行。此包只在本地生成，未写入线上。',
- '若完整 XML 超过本站上传或处理限制，使用编号 WTJ-part-*.xml 按序导入，全部片完成后再验收。分片每片最多 15 页、页面文本合计最多 1500000 字节；最终 XML 文件额外含转义/包装开销，以各文件实际大小为准。',
- '','## 页面与兼容性','','34 个正式科技树页面采用原名并仅替换旧 Tree-Start 至 Tree-End 区域，保留切换导航、分类和其他内容。没有创建新载具文章，没有改直升机页面。回退文件 WTJ-rollback-existing-trees.xml 保存这 34 页抓取时的源码，仅供需恢复时导入。',
+ '若完整 XML 超过本站上传或处理限制，使用编号 WTJ-part-*.xml 按序导入，全部片完成后再验收。分片每片最多 '+str(manifest['slice_pages'])+' 页、页面文本合计最多 '+str(manifest['slice_bytes'])+' 字节，共 '+str(manifest['slices'])+' 片；最终 XML 文件额外含转义/包装开销，以各文件实际大小为准。',
+ '','## 页面与兼容性','',str(manifest['tree_count'])+' 个既有科技树页面采用原名并仅替换旧 Tree-Start 至 Tree-End 区域，保留切换导航、分类和其他内容。回退文件 WTJ-rollback-existing-trees.xml 保存这些页导出时的源码，仅供需恢复时导入。',
+ '十国直升机均为已有页面，使用用户最新导出保留原页提示、导航和分类；44 页旧源码均包含在回退 XML 中。没有新建直升机页面或载具文章。',
  '新增支持页面使用 WTJ 前缀，不依赖测试页。MediaWiki:WTJ.js 为全站可用资源，由模板:WTJ/styles 的 ResourceLoader 标记通过本站已有 MediaWiki:Common.js 加载，不替换全站 Common.js、不要求用户 common.js。',
- '右上角的数量/展开提示已移除；筛选时仍有结果栏。链接优先采用旧树实际渲染目标，当前源码手动链接优先于其余映射，Tr 仅补充缺项。再核对旧目标及游戏中文名/代码备选的存在性；未确认时保留原目标，缺原目标时回退中文名。详见 link-audit.csv 和 manifest.json，不把 API 返回缺失的目标伪报为已存在。',
+ '右上角的数量/展开提示已移除；筛选时仍有结果栏。链接优先采用旧树实际渲染目标，当前源码手动链接优先于其余映射，Tr 仅补充缺项。再核对旧目标及游戏中文名/代码备选的存在性；未确认时保留原目标，缺原目标时回退到已核对的中文名/游戏代码页。详见 link-audit.csv 和 manifest.json，不把 API 返回缺失的目标伪报为已存在。',
+ '所有正式树（含直升机）的研发关系统一由 research_edges 折线生成；若某条关系找不到无遮挡路径，保留真实关系并回退为直线，失败清单见 manifest.json 的 route_failures（本包 '+str(len(manifest['route_failures']))+' 项）。',
  '本包 '+str(len(manifest['unverified_links']))+' 个载具目标未获 API 存在性确认；这不等于全部由本次改动新增的红链。原页面实际输出亦含这类链接，包中保留并逐项报告，尚不能宣布所有载具链接可用。',
- '','## 图片','','XML 只包含页面，不包含二进制文件。仅需上传 uploads/ 中列出的游戏代码命名图片，文件名保持不变，不加 WTJ 前缀。JSON 的 assets.file 与上传名称一致，Lua 按此字段生成 File 内链。',
+ '','## 图片','','XML 只包含页面；交付目录为工作区 ImportPack。根目录图像为待上传文件；Slices 为切片，Full 为完整替代方案，两者择一导入；Rollback 为撤销用 XML，正常部署不要导入。报告及清单保留在 wiki/production。',
  '五张背景均复用已存在的本站文件：Item own.png、Item prem.png、Item squad.png、Item group.png、Item group prem.png；模块内使用等价的下划线写法。不再上传 WTJ_folder 或 WTJ_folder_prem，也不依赖已移动且没有重定向的测试文件名。existing-backgrounds.json 记录只读核对结果。',
+ '待上传文件已按站内 imageinfo 重新核对，仅确认缺失且有本地源文件者进入 ImportPack；查询失败单列待确认。19 种类型 SVG 固色独立配置，复用图形也分开文件。',
  '','## 验收','','导入后清除正式科技树页面的解析缓存并强制刷新；用匿名窗口确认筛选栏、三模式 BR、列表、折叠与宽度。全量 Lua 和 XML 回读检查见 validation.json；本地验证不等于生产导入与 Scribunto 内存/时间预算已通过。',
- '','## 原页面替换清单','','| 页面 | 数据键 | 卡片数 | 抓取版本 |','|---|---|---:|---:|']
- for key,r in manifest['trees'].items():lines.append(f"| {r['title']} | {key} | {r['visible']} | {r['old_revision']} |")
+ '','## 原页面替换清单','','| 页面 | 数据键 | 处理 | 卡片数 | 抓取版本 |','|---|---|---|---:|---:|']
+ for key,r in manifest['trees'].items():lines.append(f"| {r['title']} | {key} | {'新建（'+manifest['mark']+'）' if r.get('created') else '替换区域'} | {r['visible']} | {r['old_revision']} |")
  lines+=['','## 上传清单','']+[f'- 文件:{f}' for f in manifest['uploads']]
  (OUT/'DEPLOY.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
  rows=[]
@@ -337,13 +508,32 @@ def instructions(pages,manifest,slices):
  for p in pages:
   url=BASE+'index.php?'+urlencode({'title':p['title'],'action':'edit','contentmodel':p['model']})
   rows.append('<details><summary>'+html.escape(p['title'])+' · '+p['model']+'</summary><a target="_blank" href="'+html.escape(url)+'">打开编辑</a><button onclick="copy(this)">复制全部源码</button><span></span><textarea readonly>'+html.escape(p['content'])+'</textarea></details>')
- (OUT/'INSTALL.html').write_text('<!doctype html><meta charset="utf-8"><title>WTJ 正式科技树部署</title><style>body{max-width:1100px;margin:24px auto;font:15px/1.6 system-ui;padding:16px}details{border:1px solid #ccc;padding:12px;margin:12px 0}textarea{width:100%;height:250px;display:block;box-sizing:border-box}button{margin:10px}</style><h1>34 棵正式科技树部署</h1><p><a href="WTJ-all-trees-production.xml">完整 XML（72 页）</a> · <a href="DEPLOY.md">部署和上传说明</a> · <a href="manifest.json">报告清单</a> · <a href="link-audit.csv">链接核对表</a></p><p>由本站 ResourceLoader 加载 MediaWiki:WTJ.js，无个人脚本设置，不替换全站 Common.js。XML 不携带图片，先按说明上传。没有线上自动保存。</p><p>有 '+str(len(manifest['unverified_links']))+' 个链接目标未获 API 存在性确认；保留旧树目标或按报告回退，不代表全部链接已可用。</p><details><summary>先上传 '+str(len(manifest['uploads']))+' 个图片文件</summary><ul>'+upload_rows+'</ul></details>'+''.join(rows)+'<script>async function copy(b){let t=b.parentElement.querySelector("textarea");t.select();try{await navigator.clipboard.writeText(t.value);b.nextElementSibling.textContent="已复制"}catch(e){b.nextElementSibling.textContent="已全选，请 Ctrl+C"}}</script>',encoding='utf-8')
- target=WORK/'packages/WTJ-all-trees-production.zip'
- with ZipFile(target,'w',ZIP_DEFLATED) as z:
-  for path in OUT.rglob('*'):
-   if path.is_file():z.write(path,path.relative_to(OUT).as_posix())
+ (OUT/'INSTALL.html').write_text('<!doctype html><meta charset="utf-8"><title>WTJ 正式科技树部署</title><style>body{max-width:1100px;margin:24px auto;font:15px/1.6 system-ui;padding:16px}details{border:1px solid #ccc;padding:12px;margin:12px 0}textarea{width:100%;height:250px;display:block;box-sizing:border-box}button{margin:10px}</style><h1>'+str(manifest['tree_count'])+' 棵正式科技树部署（含 '+str(len(manifest['helicopter_trees']))+' 棵直升机）</h1><p><a href="WTJ-all-trees-production.xml">完整 XML（'+str(len(pages))+' 页）</a> · <a href="DEPLOY.md">部署和上传说明</a> · <a href="manifest.json">报告清单</a> · <a href="link-audit.csv">链接核对表</a></p><p>由本站 ResourceLoader 加载 MediaWiki:WTJ.js，无个人脚本设置，不替换全站 Common.js。XML 不携带图片，先按说明上传。没有线上自动保存。</p><p>有 '+str(len(manifest['unverified_links']))+' 个链接目标未获 API 存在性确认；保留旧树目标或按报告回退，不代表全部链接已可用。</p><p>十国直升机均保留已有页面周边源码，回退 XML 覆盖全部 44 页。交付文件位于工作区 ImportPack，不生成 ZIP。</p><details><summary>先上传 '+str(len(manifest['uploads']))+' 个图片文件</summary><ul>'+upload_rows+'</ul></details>'+''.join(rows)+'<script>async function copy(b){let t=b.parentElement.querySelector("textarea");t.select();try{await navigator.clipboard.writeText(t.value);b.nextElementSibling.textContent="已复制"}catch(e){b.nextElementSibling.textContent="已全选，请 Ctrl+C"}}</script>',encoding='utf-8')
+ # Publish only XML and referenced upload files. Reports remain in OUT.
+ reset_import_pack()
+ for name in ('Full','Slices','Rollback','Repair'):(IMPORT_PACK/name).mkdir()
+ repair=[p for p in pages if p['title']=='MediaWiki:WTJ.js']
+ assert len(repair)==1
+ xml_file(repair,IMPORT_PACK/'Repair/WTJ-tree-sticky-offset.xml')
+ shutil.copyfile(OUT/'WTJ-all-trees-production.xml',IMPORT_PACK/'Full/WTJ-all-trees-production.xml')
+ shutil.copyfile(OUT/'WTJ-rollback-existing-trees.xml',IMPORT_PACK/'Rollback/WTJ-rollback-existing-trees.xml')
+ for path in OUT.glob('WTJ-part-*.xml'):shutil.copyfile(path,IMPORT_PACK/'Slices'/path.name)
+ for name in manifest['uploads']:shutil.copyfile(OUT/'uploads'/name,IMPORT_PACK/name)
+ delivered={path.relative_to(IMPORT_PACK).as_posix() for path in IMPORT_PACK.rglob('*') if path.is_file()}
+ expected={'Full/WTJ-all-trees-production.xml','Rollback/WTJ-rollback-existing-trees.xml','Repair/WTJ-tree-sticky-offset.xml'}
+ expected.update('Slices/'+path.name for path in OUT.glob('WTJ-part-*.xml'))
+ expected.update(manifest['uploads'])
+ assert delivered==expected,(delivered-expected,expected-delivered)
+ for path in IMPORT_PACK.rglob('*'):
+  if path.is_file():assert path.suffix.lower() in {'.xml','.svg','.png'},path
+ (OUT/'delivery-validation.json').write_text(dump({'passed':True,'directory':str(IMPORT_PACK),'files':sorted(delivered),'no_zip':True,'freshly_rebuilt':True}),encoding='utf-8')
+ from testing_cleanup import write_cleanup
+ write_cleanup(OUT/'Cleanup',[p['title'] for p in pages]+['文件:'+name for name in manifest['uploads']],
+               active_contents=[p['content'] for p in pages])
+ with (OUT/'DEPLOY.md').open('a',encoding='utf-8') as stream:
+  stream.write('\n\n## 历史测试页清理（每次导入必做）\n\n见 [清理清单](Cleanup/CLEANUP.md) 和 [管理员入口](Cleanup/CLEANUP.html)。备份并验收替代页后删除退休测试页，再核对删除日志与存在性。人工子页先迁移，图片先查用途。\n')
 
-def validate(pages,trees,index,out):
+def validate(pages,trees,index,out,regions,runtime):
  try:from lupa import LuaRuntime
  except ImportError:
   sys.path.insert(0,str(VENDOR));from lupa import LuaRuntime
@@ -354,18 +544,36 @@ def validate(pages,trees,index,out):
   return x
  def load(title):reads.append(title);return table(json.loads(bytitle[title]))
  lua.globals().load_bridge=load;lua.execute('mw={loadJsonData=function(t) return load_bridge(t) end}')
- module=lua.execute(bytitle['模块:WTJ/catalogue']);rendered={}
+ icon_cases=dict(re.findall(r'\|([a-z_]+)=\[\[File:([^|]+)\|10px\|link=\]\]',bytitle['模板:WTJ/type-icon']))
+ def expand_icon(key):
+  assert key in icon_cases,key
+  return '[[File:'+icon_cases[key]+'|10px|link=]]'
+ lua.globals().icon_bridge=expand_icon
+ lua.execute('mw.getCurrentFrame=function() return {expandTemplate=function(self,opts) return icon_bridge(opts.args[1]) end} end')
+ module=lua.execute(runtime);rendered={}
  preview=WORK/'preview/production';preview.mkdir(parents=True,exist_ok=True)
  files=json.loads((EVIDENCE/'presentation-map.json').read_text(encoding='utf-8'))['files']
- css=(ROOT/'src/tree.css').read_text(encoding='utf-8')
+ css=(out/'site-parsed-tree.css').read_text(encoding='utf-8')
  shop=json.loads((REPO/'char.vromfs.bin_u/config/shop.blkx').read_text(encoding='utf-8'))
- from tree_policy import exclusion_reason
  tags=json.loads((REPO/'char.vromfs.bin_u/config/unittags.blkx').read_text(encoding='utf-8'))
+ targets=json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8'))
+ helis=helicopter_keys(targets)
  for key,tree in trees.items():
   reads.clear();body=module.tree(table({'args':{'tree':key+'_tree','links':'existing'}}))
   assert 'wtr-error' not in body,(key,body)
+  # Browser-only previews accept tags that MediaWiki escapes as literal text.
+  assert not re.search(r'</?(?:details|summary)\b',body,re.I),key
+  assert 'wtt-extra' not in body and '数据说明' not in body,key
+  assert '<span class="wtt-version">游戏版本 '+html.escape(tree['game_version'])+'</span>' in body,key
   assert body.count('class="wtt-card ')==tree['visible_count'],key
   assert 'wtt-search-hint' not in body and '/vehicle/' not in body and '_testing' not in body,key
+  # Every routed relation must reach the rendered board (no silent edge loss).
+  assert body.count('class="wtt-arrow"')+body.count('class="wtt-edge"')==len(tree['layout']['arrows']),key
+  if key in helis:
+   # Fork and cross-rank relations must survive routing, not merely be counted.
+   for edge in tree['edges']:
+    assert ('data-from="'+edge['from']+'"' in body and 'data-to="'+edge['to']+'"' in body),(key,edge)
+   assert 'wtt-requirement' in body,key
   assert len(reads)==2,key
   native_reads=list(reads)
   lua.globals().content_bridge=lambda title:bytitle[title]
@@ -384,6 +592,8 @@ def validate(pages,trees,index,out):
    expected.append(nodes)
   assert [[(n['folder'],n['units']) for n in c['nodes']] for c in tree['columns']]==expected,key
   actual=json.loads(bytitle['WTJ/data/'+key+'_tree.json'])
+  # Local previews follow the generated board, which retains every relation.
+  tree['layout'].update(actual['layout'])
   for code,asset in actual['assets'].items():
    if asset.get('local') and not asset.get('remote'):
     assert (out/'uploads'/asset['file']).is_file(),(key,code,asset['file'])
@@ -393,34 +603,55 @@ def validate(pages,trees,index,out):
    filename,size=m[1],m[2];asset=next((a for a in actual['assets'].values() if a['file']==filename),None)
    if asset and asset['local']:src='../../assets/'+asset['local']
    elif filename in ('Item_group.png','Item_group_prem.png'):src='../../assets/'+('WTJTreeTesting_folder_prem.png' if filename=='Item_group_prem.png' else 'WTJTreeTesting_folder.png')
+   elif (out/'uploads'/filename).exists():src='../../../wiki/production/uploads/'+filename
    elif (WORK/'assets'/filename).exists():src='../../assets/'+filename
    else:src=(asset or {}).get('remote') or files.get(filename.casefold(),{}).get('url') or BASE+'Special:Redirect/file/'+filename
    return '<img '+('height="43"' if size=='x43' else 'width="'+size+'"')+' src="'+html.escape(src,quote=True)+'">'
   preview_body=re.sub(r'\[\[File:([^|]+)\|(120|10|x43)px\|link=\]\]',image_link,body)
   preview_body=re.sub(r'\[\[([^|]+)\|([^\]]+)\]\]',lambda m:'<a href="'+html.escape(BASE+'index.php?'+urlencode({'title':html.unescape(m[1])}),quote=True)+'">'+m[2]+'</a>',preview_body)
-  assert '[[' not in preview_body,key
-  (preview/(key+'.html')).write_text('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+key+'</title><style>body{margin:0;padding:16px;background:#eff0f1}a{text-decoration:none}'+css+'</style>'+preview_body+'<script src="../../../wiki/production/pages/tree.js"></script></html>',encoding='utf-8')
-  rendered[key]={'cards':tree['visible_count'],'json_reads':native_reads,'both_lua_load_paths':True,'datamine_shop_membership_verified':True}
+  assert '[[' not in preview_body and '{{WTJ/type-icon' not in preview_body,key
+  mark=''
+  (preview/(key+'.html')).write_text('<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+key+'</title><style>body{margin:0;padding:16px;background:#eff0f1}a{text-decoration:none}'+css+'</style>'+mark+preview_body+'<script src="../../../wiki/production/pages/tree.js"></script></html>',encoding='utf-8')
+  rendered[key]={'cards':tree['visible_count'],'json_reads':native_reads,'both_lua_load_paths':True,'datamine_shop_membership_verified':True,'created_page':False,'arrows':len(tree['layout']['arrows']),'routing':tree['layout'].get('routing')}
  ns={'m':NS};xmlpages=ET.parse(out/'WTJ-all-trees-production.xml').findall('m:page',ns)
  assert len(xmlpages)==len(pages)
  for p in xmlpages:assert p.find('m:revision/m:text',ns).text==bytitle[p.find('m:title',ns).text]
  exported=json.loads((EVIDENCE/'exported-sources.json').read_text(encoding='utf-8'))
  for title,content in bytitle.items():
+  if title not in targets.values():continue
+  key=next(k for k,v in targets.items() if v==title)
   if title in exported:
-   original=exported[title]['content'];pattern=r'\{\{Tree-Start\b.*?\{\{Tree-End\s*\}\}'
-   match=re.search(pattern,original,re.S|re.I)
-   assert content==original[:match.start()]+'{{WTJ/styles}}\n{{#invoke:WTJ/catalogue|tree|tree='+next(k for k,v in json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8')).items() if v==title)+'_tree|links=existing}}'+original[match.end():],title
+   # Existing pages: character-exact replacement of the old tree region only.
+   original=exported[title]['content'];match=TREE_REGION.search(original)
+   assert match and content==original[:match.start()]+regions[key]+original[match.end():],title
+   assert regions[key]=='{{WTJ/styles}}\n{{#invoke:WTJ/catalogue|tree|tree='+key+'_tree|links=existing}}',title
+  else:raise FileNotFoundError('Missing exported source for existing page: '+title)
  slice_titles=[]
  for path in sorted(out.glob('WTJ-part-*.xml')):
-  nodes=ET.parse(path).findall('m:page',ns);assert len(nodes)<=15
-  assert sum(len((n.findtext('m:revision/m:text',default='',namespaces=ns)).encode('utf-8')) for n in nodes)<=1500000
+  nodes=ET.parse(path).findall('m:page',ns);assert 0<len(nodes)<=SLICE_PAGES
+  assert sum(len((n.findtext('m:revision/m:text',default='',namespaces=ns)).encode('utf-8')) for n in nodes)<=SLICE_BYTES
   slice_titles.extend(n.findtext('m:title',namespaces=ns) for n in nodes)
  assert len(slice_titles)==len(set(slice_titles))==len(pages) and set(slice_titles)==set(bytitle)
- assert len(trees)==34 and all(t['branch']!='helicopters' for t in trees.values())
- runtime=bytitle['模块:WTJ/catalogue']
+ assert len(trees)==len(shop_targets())==EXPECTED_TREES
+ assert {k for k,t in trees.items() if t['branch']=='helicopters'}==set(EXPECTED_HELICOPTERS)
+ assert {k:trees[k]['visible_count'] for k in helis if k in trees}=={k:v for k,v in EXPECTED_HELICOPTERS.items() if k in targets}
+ page_helis={targets[k] for k in helis}
+ rollback=ET.parse(out/'WTJ-rollback-existing-trees.xml').findall('m:page',ns)
+ assert len(rollback)==EXPECTED_TREES
+ assert page_helis <= {p.findtext('m:title',namespaces=ns) for p in rollback}
  assert "'Item_group_prem.png'" in runtime and "'Item_group.png'" in runtime
- assert not any(p.name.startswith('WTJ_') for p in (out/'uploads').iterdir())
- (out/'validation.json').write_text(dump({'passed':True,'trees':rendered,'xml_roundtrip':True,'upload_filenames_match_json':True,'existing_folder_backgrounds':'Item_group.png / Item_group_prem.png','live_import_verified':False}),encoding='utf-8')
- (preview/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>34 棵正式科技树本地预览</title><h1>34 棵正式科技树本地预览</h1><p>本地 Lua 输出及正式 JS/CSS；不代表线上导入已经验收。</p>'+''.join('<p><a href="'+k+'.html">'+v+'</a></p>' for k,v in json.loads((EVIDENCE/'targets.json').read_text(encoding='utf-8')).items()),encoding='utf-8')
+ assert '(pr.existing_page or pr.fallback_page or r.name)' in runtime
+ assert 'exp_helicopter=' in runtime
+ assert '模板:WTJ/type-icon' in bytitle
+ assert len(icon_cases)==19
+ (out/'validation.json').write_text(dump({'passed':True,'trees':rendered,'tree_count':len(trees),'helicopter_trees':sorted(helis),'created_pages':[],'xml_roundtrip':True,'rollback_pages':len(rollback),'upload_filenames_match_json':True,'existing_folder_backgrounds':'Item_group.png / Item_group_prem.png','routing':'research_edges for every formal tree','live_import_verified':False}),encoding='utf-8')
+ links=''.join('<li><a href="'+k+'.html">'+targets[k]+'</a> · '+str(trees[k]['visible_count'])+' 项'+'</li>' for k in targets)
+ (preview/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>'+str(len(trees))+' 棵正式科技树本地预览</title><style>body{font:16px/1.7 system-ui;max-width:900px;margin:32px auto;padding:0 16px}</style><h1>'+str(len(trees))+' 棵正式科技树本地预览（含 '+str(len(helis))+' 棵直升机）</h1><p>本地 Lua 输出及正式 JS/CSS；不代表线上导入已经验收。</p><ul>'+links+'</ul>',encoding='utf-8')
 
 if __name__=='__main__':main()
+# Integration points for callers (tests, the icon/SVG workstream, GUI):
+#   shop_targets()                    -> {tree key: Chinese page title}, 44 entries incl. helicopters
+#   helicopter_keys(targets)          -> keys of trees created as new pages
+#   page_region(key)                  -> auto-marked wikitext region used for created pages
+#   research_edges(nodes, edges)      -> shared router used for every formal tree
+# The package is validated by validate(); no function here writes to the Wiki.
